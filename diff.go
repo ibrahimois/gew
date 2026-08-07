@@ -25,6 +25,9 @@ func (a app) diff(args []string) error {
 	if err != nil {
 		return err
 	}
+	if state.Backend == WorkspaceGit {
+		return a.gitDiff(root, state, *staged)
+	}
 	if err := ensureSnapshotObjects(root, state); err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -22,12 +23,15 @@ type mergeConflict struct {
 }
 
 type activeMerge struct {
-	Version       int                  `json:"version"`
-	RemoteCommit  string               `json:"remote_commit"`
-	Message       string               `json:"message"`
-	PreviousState workspaceState       `json:"previous_state"`
-	OursFiles     map[string]fileState `json:"ours_files"`
-	Conflicts     []mergeConflict      `json:"conflicts"`
+	Version           int                  `json:"version"`
+	RemoteCommit      string               `json:"remote_commit"`
+	Message           string               `json:"message"`
+	PreviousState     workspaceState       `json:"previous_state"`
+	OursFiles         map[string]fileState `json:"ours_files"`
+	Conflicts         []mergeConflict      `json:"conflicts"`
+	GitPreviousHead   string               `json:"git_previous_head,omitempty"`
+	GitRemoteAnchor   string               `json:"git_remote_anchor,omitempty"`
+	GitTrackingBefore string               `json:"git_tracking_before,omitempty"`
 }
 
 type optionalContent struct {
@@ -64,6 +68,9 @@ func (a app) merge(args []string) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitMerge(root, state, *abort, *continueMerge, strings.TrimSpace(*message))
 	}
 	mergeState, err := loadMergeState(root)
 	if err != nil {
@@ -134,7 +141,7 @@ func containsConflictMarkerLine(content []byte) bool {
 	return false
 }
 
-func (a app) mergeRemote(root string, state workspaceState, c *client, remoteCommit string, hadWorkingChanges bool) error {
+func (a app) mergeRemote(root string, state workspaceState, remote Forge, remoteCommit string, hadWorkingChanges bool) error {
 	baseDirectory, err := os.MkdirTemp("", "gew-merge-base-")
 	if err != nil {
 		return err
@@ -152,7 +159,7 @@ func (a app) mergeRemote(root string, state workspaceState, c *client, remoteCom
 	defer os.RemoveAll(resultDirectory)
 
 	if state.BaseCommit != "" {
-		baseArchive, err := c.download(archiveAPIPath(state.Owner, state.Repository, state.BaseCommit))
+		baseArchive, err := remote.Snapshot(context.Background(), state.Remote, state.BaseCommit)
 		if err != nil {
 			return fmt.Errorf("download merge base %.12s: %w", state.BaseCommit, err)
 		}
@@ -160,14 +167,14 @@ func (a app) mergeRemote(root string, state workspaceState, c *client, remoteCom
 			return err
 		}
 	}
-	theirsArchive, err := c.download(archiveAPIPath(state.Owner, state.Repository, state.Branch))
+	theirsArchive, err := remote.Snapshot(context.Background(), state.Remote, remoteCommit)
 	if err != nil {
 		return err
 	}
 	if err := extractArchive(theirsArchive, theirsDirectory); err != nil {
 		return err
 	}
-	remoteTree, err := c.tree(state.Owner, state.Repository, remoteCommit)
+	remoteTree, err := remote.Tree(context.Background(), state.Remote, remoteCommit)
 	if err != nil {
 		return err
 	}
@@ -206,7 +213,7 @@ func (a app) mergeRemote(root string, state workspaceState, c *client, remoteCom
 		return err
 	}
 	state.BaseCommit = remoteCommit
-	state.Files = mergeFileMetadata(theirsFiles, remoteTree)
+	state.Files = mergeFileMetadata(theirsFiles, remoteBlobIDs(remoteTree))
 	state.Queue = nil
 	state.LocalHead = ""
 	if err := saveState(root, state); err != nil {

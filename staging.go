@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -65,6 +66,9 @@ func (a app) add(args []string) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitAdd(root, state, flags.Args(), *allShort || *allLong)
 	}
 	if err := ensureBaselineObjects(root, state.Files); err != nil {
 		return err
@@ -153,9 +157,12 @@ func (a app) reset(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	root, _, err := findWorkspace()
+	root, state, err := findWorkspace()
 	if err != nil {
 		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitReset(root, state, flags.Args())
 	}
 	index, err := loadIndex(root)
 	if err != nil {
@@ -193,6 +200,8 @@ func (a app) commit(args []string) error {
 	flags := flag.NewFlagSet("commit", flag.ContinueOnError)
 	flags.SetOutput(a.errOut)
 	message := flags.String("m", "", "commit message")
+	authorName := flags.String("author-name", "", "local Git author name")
+	authorEmail := flags.String("author-email", "", "local Git author email")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -202,6 +211,9 @@ func (a app) commit(args []string) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitCommit(root, state, strings.TrimSpace(*message), *authorName, *authorEmail)
 	}
 	index, err := loadIndex(root)
 	if err != nil {
@@ -290,6 +302,9 @@ func (a app) log(args []string) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitLog(root, state, *oneline)
 	}
 	if len(state.History) == 0 {
 		fmt.Fprintln(a.out, "No local gew commits yet.")
@@ -512,7 +527,7 @@ func ensureSnapshotObjects(root string, state workspaceState) error {
 		return nil
 	}
 	sort.Strings(missing)
-	c, err := clientForWorkspace(state)
+	remote, err := forgeForWorkspace(state)
 	if err != nil {
 		return err
 	}
@@ -521,7 +536,7 @@ func ensureSnapshotObjects(root string, state workspaceState) error {
 		if metadata.BlobSHA == "" {
 			return fmt.Errorf("content snapshot for %s is unavailable and has no remote blob SHA", filePath)
 		}
-		content, err := c.blob(state.Owner, state.Repository, metadata.BlobSHA)
+		content, err := remote.Blob(context.Background(), state.Remote, RemoteFile{BlobID: metadata.BlobSHA})
 		if err != nil {
 			return fmt.Errorf("fetch baseline content for %s: %w", filePath, err)
 		}
