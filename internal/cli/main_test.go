@@ -19,6 +19,22 @@ import (
 	"testing"
 )
 
+func runTestCommand(a app, name string, args ...string) error {
+	return RunContext(context.Background(), append([]string{name}, args...), a.out, a.errOut)
+}
+
+func (a app) clone(args []string) error   { return runTestCommand(a, "clone", args...) }
+func (a app) status(args []string) error  { return runTestCommand(a, "status", args...) }
+func (a app) add(args []string) error     { return runTestCommand(a, "add", args...) }
+func (a app) reset(args []string) error   { return runTestCommand(a, "reset", args...) }
+func (a app) diff(args []string) error    { return runTestCommand(a, "diff", args...) }
+func (a app) commit(args []string) error  { return runTestCommand(a, "commit", args...) }
+func (a app) log(args []string) error     { return runTestCommand(a, "log", args...) }
+func (a app) pull(args []string) error    { return runTestCommand(a, "pull", args...) }
+func (a app) merge(args []string) error   { return runTestCommand(a, "merge", args...) }
+func (a app) migrate(args []string) error { return runTestCommand(a, "migrate", args...) }
+func (a app) push(args []string) error    { return runTestCommand(a, "push", args...) }
+
 type fakeGitea struct {
 	mu              sync.Mutex
 	commit          int

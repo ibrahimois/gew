@@ -2,8 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,24 +11,15 @@ import (
 	"strings"
 )
 
-func (a app) diff(args []string) error {
-	flags := flag.NewFlagSet("diff", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	staged := flags.Bool("staged", false, "show staged changes")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("usage: gew diff [--staged]")
-	}
+func (a app) diffOperation(ctx context.Context, staged bool) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
 	}
 	if state.Backend == WorkspaceGit {
-		return a.gitDiff(root, state, *staged)
+		return a.gitDiff(root, state, staged)
 	}
-	if err := ensureSnapshotObjects(root, state); err != nil {
+	if err := ensureSnapshotObjects(ctx, root, state); err != nil {
 		return err
 	}
 	index, err := loadIndex(root)
@@ -37,7 +28,7 @@ func (a app) diff(args []string) error {
 	}
 	indexFiles := effectiveIndexFiles(state.Files, index)
 	var before, after map[string]fileState
-	if *staged {
+	if staged {
 		before = state.Files
 		after = indexFiles
 	} else {
@@ -55,7 +46,7 @@ func (a app) diff(args []string) error {
 		}
 		var afterContent []byte
 		var afterOK bool
-		if *staged {
+		if staged {
 			afterContent, afterOK, err = snapshotContent(root, item.Path, after)
 		} else if _, exists := after[item.Path]; exists {
 			afterContent, err = os.ReadFile(filepath.Join(root, filepath.FromSlash(item.Path)))

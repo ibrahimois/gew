@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -36,24 +35,13 @@ type activeMerge struct {
 
 type optionalContent = mergecore.Content
 
-func (a app) merge(args []string) error {
-	flags := flag.NewFlagSet("merge", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	abort := flags.Bool("abort", false, "restore the pre-merge workspace")
-	continueMerge := flags.Bool("continue", false, "stage resolved files and commit")
-	message := flags.String("m", "", "merge commit message")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 || (*abort == *continueMerge) {
-		return errors.New("usage: gew merge (--abort | --continue [-m MESSAGE])")
-	}
+func (a app) mergeOperation(ctx context.Context, options mergeOptions) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
 	}
 	if state.Backend == WorkspaceGit {
-		return a.gitMerge(root, state, *abort, *continueMerge, strings.TrimSpace(*message))
+		return a.gitMerge(root, state, options.Abort, options.Continue, strings.TrimSpace(options.Message))
 	}
 	mergeState, err := loadMergeState(root)
 	if err != nil {
@@ -62,7 +50,7 @@ func (a app) merge(args []string) error {
 	if mergeState == nil {
 		return errors.New("no merge is in progress")
 	}
-	if *abort {
+	if options.Abort {
 		if err := restoreSnapshot(root, mergeState.OursFiles); err != nil {
 			return err
 		}
@@ -81,14 +69,14 @@ func (a app) merge(args []string) error {
 	if err := validateMergeResolved(root, mergeState); err != nil {
 		return err
 	}
-	commitMessage := strings.TrimSpace(*message)
+	commitMessage := strings.TrimSpace(options.Message)
 	if commitMessage == "" {
 		commitMessage = mergeState.Message
 	}
-	if err := a.add([]string{"-A"}); err != nil {
+	if err := a.addOperation(ctx, addOptions{All: true}); err != nil {
 		return err
 	}
-	if err := a.commit([]string{"-m", commitMessage}); err != nil {
+	if err := a.commitOperation(ctx, commitOptions{Message: commitMessage}); err != nil {
 		return err
 	}
 	_ = state
@@ -124,7 +112,7 @@ func containsConflictMarkerLine(content []byte) bool {
 	return false
 }
 
-func (a app) mergeRemote(root string, state workspaceState, remote Forge, remoteCommit string, hadWorkingChanges bool) error {
+func (a app) mergeRemote(ctx context.Context, root string, state workspaceState, remote Forge, remoteCommit string, hadWorkingChanges bool) error {
 	baseDirectory, err := os.MkdirTemp("", "gew-merge-base-")
 	if err != nil {
 		return err
@@ -142,7 +130,7 @@ func (a app) mergeRemote(root string, state workspaceState, remote Forge, remote
 	defer os.RemoveAll(resultDirectory)
 
 	if state.BaseCommit != "" {
-		baseArchive, err := forgeSnapshot(context.Background(), remote, state.Remote, state.BaseCommit)
+		baseArchive, err := forgeSnapshot(ctx, remote, state.Remote, state.BaseCommit)
 		if err != nil {
 			return fmt.Errorf("download merge base %.12s: %w", state.BaseCommit, err)
 		}
@@ -150,14 +138,14 @@ func (a app) mergeRemote(root string, state workspaceState, remote Forge, remote
 			return err
 		}
 	}
-	theirsArchive, err := forgeSnapshot(context.Background(), remote, state.Remote, remoteCommit)
+	theirsArchive, err := forgeSnapshot(ctx, remote, state.Remote, remoteCommit)
 	if err != nil {
 		return err
 	}
 	if err := extractArchive(theirsArchive, theirsDirectory); err != nil {
 		return err
 	}
-	remoteTree, err := remote.Tree(context.Background(), state.Remote, remoteCommit)
+	remoteTree, err := remote.Tree(ctx, state.Remote, remoteCommit)
 	if err != nil {
 		return err
 	}
@@ -217,7 +205,7 @@ func (a app) mergeRemote(root string, state workspaceState, remote Forge, remote
 		return errors.New("automatic merge failed; conflicts require resolution")
 	}
 	if len(previousState.Queue) > 0 {
-		if err := a.add([]string{"-A"}); err != nil {
+		if err := a.addOperation(ctx, addOptions{All: true}); err != nil {
 			return err
 		}
 		index, err := loadIndex(root)
@@ -225,7 +213,7 @@ func (a app) mergeRemote(root string, state workspaceState, remote Forge, remote
 			return err
 		}
 		if len(index.Entries) > 0 {
-			if err := a.commit([]string{"-m", mergeState.Message}); err != nil {
+			if err := a.commitOperation(ctx, commitOptions{Message: mergeState.Message}); err != nil {
 				return err
 			}
 			_, updatedState, err := findWorkspace()

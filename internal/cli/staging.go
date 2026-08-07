@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -52,28 +51,18 @@ type pathSelector struct {
 	recursive bool
 }
 
-func (a app) add(args []string) error {
-	flags := flag.NewFlagSet("add", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	allShort := flags.Bool("A", false, "stage all changes")
-	allLong := flags.Bool("all", false, "stage all changes")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if !*allShort && !*allLong && flags.NArg() == 0 {
-		return errors.New("usage: gew add [-A|--all] PATH...")
-	}
+func (a app) addOperation(_ context.Context, options addOptions) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
 	}
 	if state.Backend == WorkspaceGit {
-		return a.gitAdd(root, state, flags.Args(), *allShort || *allLong)
+		return a.gitAdd(root, state, options.Paths, options.All)
 	}
 	if err := ensureBaselineObjects(root, state.Files); err != nil {
 		return err
 	}
-	selectors, err := selectorsForArgs(root, flags.Args(), *allShort || *allLong)
+	selectors, err := selectorsForArgs(root, options.Paths, options.All)
 	if err != nil {
 		return err
 	}
@@ -151,18 +140,13 @@ func (a app) add(args []string) error {
 	return nil
 }
 
-func (a app) reset(args []string) error {
-	flags := flag.NewFlagSet("reset", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
+func (a app) resetOperation(_ context.Context, paths []string) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
 	}
 	if state.Backend == WorkspaceGit {
-		return a.gitReset(root, state, flags.Args())
+		return a.gitReset(root, state, paths)
 	}
 	index, err := loadIndex(root)
 	if err != nil {
@@ -173,11 +157,11 @@ func (a app) reset(args []string) error {
 		return nil
 	}
 	removed := 0
-	if flags.NArg() == 0 {
+	if len(paths) == 0 {
 		removed = len(index.Entries)
 		index.Entries = make(map[string]indexEntry)
 	} else {
-		selectors, err := selectorsForArgs(root, flags.Args(), false)
+		selectors, err := selectorsForArgs(root, paths, false)
 		if err != nil {
 			return err
 		}
@@ -196,24 +180,13 @@ func (a app) reset(args []string) error {
 	return nil
 }
 
-func (a app) commit(args []string) error {
-	flags := flag.NewFlagSet("commit", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	message := flags.String("m", "", "commit message")
-	authorName := flags.String("author-name", "", "local Git author name")
-	authorEmail := flags.String("author-email", "", "local Git author email")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 || strings.TrimSpace(*message) == "" {
-		return errors.New("usage: gew commit -m MESSAGE")
-	}
+func (a app) commitOperation(_ context.Context, options commitOptions) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
 	}
 	if state.Backend == WorkspaceGit {
-		return a.gitCommit(root, state, strings.TrimSpace(*message), *authorName, *authorEmail)
+		return a.gitCommit(root, state, strings.TrimSpace(options.Message), options.AuthorName, options.AuthorEmail)
 	}
 	index, err := loadIndex(root)
 	if err != nil {
@@ -244,7 +217,7 @@ func (a app) commit(args []string) error {
 		parent = state.BaseCommit
 	}
 	commit := localCommit{
-		Parent: parent, Message: strings.TrimSpace(*message), CreatedAt: time.Now().UTC(), Changes: changes,
+		Parent: parent, Message: strings.TrimSpace(options.Message), CreatedAt: time.Now().UTC(), Changes: changes,
 	}
 	commit.ID, err = localCommitID(commit)
 	if err != nil {
@@ -289,22 +262,13 @@ func (a app) commit(args []string) error {
 	return nil
 }
 
-func (a app) log(args []string) error {
-	flags := flag.NewFlagSet("log", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	oneline := flags.Bool("oneline", false, "one commit per line")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("usage: gew log [--oneline]")
-	}
+func (a app) logOperation(_ context.Context, oneline bool) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
 	}
 	if state.Backend == WorkspaceGit {
-		return a.gitLog(root, state, *oneline)
+		return a.gitLog(root, state, oneline)
 	}
 	if len(state.History) == 0 {
 		fmt.Fprintln(a.out, "No local gew commits yet.")
@@ -321,7 +285,7 @@ func (a app) log(args []string) error {
 		} else if commit.SupersededBy != "" {
 			label = "superseded by " + shortID(commit.SupersededBy)
 		}
-		if *oneline {
+		if oneline {
 			fmt.Fprintf(a.out, "%.12s %-20s %s\n", commit.ID, "["+label+"]", firstLine(commit.Message))
 			continue
 		}
@@ -511,7 +475,7 @@ func ensureBaselineObjects(root string, files map[string]fileState) error {
 	return nil
 }
 
-func ensureSnapshotObjects(root string, state workspaceState) error {
+func ensureSnapshotObjects(ctx context.Context, root string, state workspaceState) error {
 	if err := ensureBaselineObjects(root, state.Files); err != nil {
 		return err
 	}
@@ -536,7 +500,7 @@ func ensureSnapshotObjects(root string, state workspaceState) error {
 		if metadata.BlobSHA == "" {
 			return fmt.Errorf("content snapshot for %s is unavailable and has no remote blob SHA", filePath)
 		}
-		content, err := remote.Blob(context.Background(), state.Remote, RemoteFile{BlobID: metadata.BlobSHA})
+		content, err := remote.Blob(ctx, state.Remote, RemoteFile{BlobID: metadata.BlobSHA})
 		if err != nil {
 			return fmt.Errorf("fetch baseline content for %s: %w", filePath, err)
 		}

@@ -107,7 +107,7 @@ func TestGitExportMapsDifferentIDsAndAdvancesTrackingAfterVerification(t *testin
 		t.Fatal(err)
 	}
 	forge := &gitExportForge{head: "remote-base", files: map[string][]byte{"README.md": []byte("base\n")}}
-	if err := a.gitPushWithForge(root, state, "", forge); err != nil {
+	if err := a.gitPushWithForge(context.Background(), root, state, "", forge); err != nil {
 		t.Fatal(err)
 	}
 	if forge.applyCount != 1 || forge.head != "provider-1" || string(forge.files["README.md"]) != "changed\n" {
@@ -145,7 +145,7 @@ func TestGitExportStaleHeadDoesNotWriteOrAdvance(t *testing.T) {
 		t.Fatal(err)
 	}
 	forge := &gitExportForge{head: "advanced", files: map[string][]byte{"README.md": []byte("remote\n")}}
-	err := a.gitPushWithForge(root, state, "", forge)
+	err := a.gitPushWithForge(context.Background(), root, state, "", forge)
 	if err == nil || !strings.Contains(err.Error(), "advanced") || forge.applyCount != 0 {
 		t.Fatalf("push error/count = %v/%d", err, forge.applyCount)
 	}
@@ -171,13 +171,13 @@ func TestGitExportAmbiguousAcceptedResponseReconcilesWithoutDuplicate(t *testing
 		t.Fatal(err)
 	}
 	forge := &gitExportForge{head: "remote-base", files: map[string][]byte{"README.md": []byte("base\n")}, loseResult: true}
-	if err := a.gitPushWithForge(root, state, "", forge); err == nil || forge.applyCount != 1 {
+	if err := a.gitPushWithForge(context.Background(), root, state, "", forge); err == nil || forge.applyCount != 1 {
 		t.Fatalf("ambiguous first push = %v, count %d", err, forge.applyCount)
 	}
 	if _, err := os.Stat(exportPreparedPath(root)); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.gitPushWithForge(root, state, "", forge); err != nil {
+	if err := a.gitPushWithForge(context.Background(), root, state, "", forge); err != nil {
 		t.Fatal(err)
 	}
 	if forge.applyCount != 1 {

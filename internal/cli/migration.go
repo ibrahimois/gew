@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,19 +30,7 @@ type gitMigrationManifest struct {
 	CommitMap     map[string]string `json:"commit_map,omitempty"`
 }
 
-func (a app) migrate(args []string) error {
-	flags := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	flags.SetOutput(a.errOut)
-	target := flags.String("to", "", "destination backend")
-	dryRun := flags.Bool("dry-run", false, "validate without writing")
-	authorName := flags.String("author-name", "", "local Git author name")
-	authorEmail := flags.String("author-email", "", "local Git author email")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 || *target != string(WorkspaceGit) {
-		return errors.New("usage: gew migrate --to git [--dry-run] [--author-name NAME --author-email EMAIL]")
-	}
+func (a app) migrateOperation(ctx context.Context, options migrateOptions) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
@@ -52,11 +39,11 @@ func (a app) migrate(args []string) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := migrateToGit(context.Background(), root, &state, remote, *dryRun, *authorName, *authorEmail)
+	manifest, err := migrateToGit(ctx, root, &state, remote, options.DryRun, options.AuthorName, options.AuthorEmail)
 	if err != nil {
 		return err
 	}
-	if *dryRun {
+	if options.DryRun {
 		fmt.Fprintf(a.out, "Migration dry-run passed: %d queued commit(s), remote %.12s, no files written.\n", len(manifest.Queue), manifest.RemoteHead)
 		return nil
 	}

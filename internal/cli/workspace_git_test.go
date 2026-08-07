@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -146,7 +147,7 @@ func TestGitPullCleanImportsRemoteAnchor(t *testing.T) {
 	root, state := makeGitWorkspace(t)
 	a := app{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}}
 	remote := &gitExportForge{head: "remote-next", files: map[string][]byte{"README.md": []byte("remote\n"), "new.txt": []byte("new\n")}}
-	if err := a.gitPull(root, state, remote, false); err != nil {
+	if err := a.gitPull(context.Background(), root, state, remote, false); err != nil {
 		t.Fatal(err)
 	}
 	_, updated, err := readWorkspaceAt(root)
@@ -181,7 +182,7 @@ func TestGitPullMergesPendingCommitAndConflictAbort(t *testing.T) {
 	repository, _ := git.PlainOpen(root)
 	oldHead, _ := repository.Head()
 	remote := &gitExportForge{head: "remote-next", files: map[string][]byte{"README.md": []byte("remote\n")}}
-	err := a.gitPull(root, state, remote, false)
+	err := a.gitPull(context.Background(), root, state, remote, false)
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("pull conflict = %v", err)
 	}
@@ -226,7 +227,7 @@ func TestGitPullMergesNonOverlappingPendingCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote := &gitExportForge{head: "remote-next", files: map[string][]byte{"README.md": []byte("base\n"), "remote.txt": []byte("remote\n")}}
-	if err := a.gitPull(root, state, remote, false); err != nil {
+	if err := a.gitPull(context.Background(), root, state, remote, false); err != nil {
 		t.Fatal(err)
 	}
 	_, updated, _ := readWorkspaceAt(root)
@@ -257,7 +258,7 @@ func TestGitMergeContinueCreatesPendingResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote := &gitExportForge{head: "remote-next", files: map[string][]byte{"README.md": []byte("remote\n")}}
-	if err := a.gitPull(root, state, remote, false); err == nil {
+	if err := a.gitPull(context.Background(), root, state, remote, false); err == nil {
 		t.Fatal("expected merge conflict")
 	}
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("resolved\n"), 0o644); err != nil {

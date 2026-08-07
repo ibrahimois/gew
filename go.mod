@@ -2,7 +2,10 @@ module gew
 
 go 1.22
 
-require github.com/go-git/go-git/v5 v5.13.2
+require (
+	github.com/go-git/go-git/v5 v5.13.2
+	github.com/urfave/cli/v3 v3.10.1
+)
 
 require (
 	dario.cat/mergo v1.0.0 // indirect

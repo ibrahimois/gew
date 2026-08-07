@@ -615,7 +615,7 @@ func materializeSnapshot(files map[string][]byte) (string, error) {
 	return directory, nil
 }
 
-func (a app) gitPull(root string, state workspaceState, remote Forge, ffOnly bool) error {
+func (a app) gitPull(ctx context.Context, root string, state workspaceState, remote Forge, ffOnly bool) error {
 	repository, worktree, err := openGitWorkspace(root, state)
 	if err != nil {
 		return err
@@ -639,7 +639,7 @@ func (a app) gitPull(root string, state workspaceState, remote Forge, ffOnly boo
 	if err != nil {
 		return err
 	}
-	remoteHead, err := remote.Head(context.Background(), state.Remote, state.Branch)
+	remoteHead, err := remote.Head(ctx, state.Remote, state.Branch)
 	if err != nil {
 		if isRemoteNotFound(err) && state.BaseCommit == "" {
 			fmt.Fprintln(a.out, "Already up to date (remote repository is empty).")
@@ -654,7 +654,7 @@ func (a app) gitPull(root string, state workspaceState, remote Forge, ffOnly boo
 	if ffOnly && len(pending) != 0 {
 		return errors.New("fast-forward pull is not possible with unpushed local Git commits")
 	}
-	theirs, remoteFiles, err := remoteByteSnapshot(context.Background(), remote, state.Remote, remoteHead)
+	theirs, remoteFiles, err := remoteByteSnapshot(ctx, remote, state.Remote, remoteHead)
 	if err != nil {
 		return err
 	}
@@ -873,7 +873,7 @@ func (a app) gitMerge(root string, state workspaceState, abort, continueMerge bo
 		return nil
 	}
 	if !continueMerge {
-		return errors.New("usage: gew merge (--abort | --continue [-m MESSAGE])")
+		return errors.New("merge continuation mode is required")
 	}
 	if err := validateMergeResolved(root, mergeState); err != nil {
 		return err
@@ -1085,15 +1085,15 @@ func advanceGitTracking(repository *git.Repository, trackingName string, oldOID,
 	return repository.Storer.CheckAndSetReference(next, plumbing.NewHashReference(name, oldOID))
 }
 
-func (a app) gitPush(root string, state workspaceState, newBranch string) error {
+func (a app) gitPush(ctx context.Context, root string, state workspaceState, newBranch string) error {
 	remote, err := forgeForWorkspace(state)
 	if err != nil {
 		return err
 	}
-	return a.gitPushWithForge(root, state, newBranch, remote)
+	return a.gitPushWithForge(ctx, root, state, newBranch, remote)
 }
 
-func (a app) gitPushWithForge(root string, state workspaceState, newBranch string, remote Forge) error {
+func (a app) gitPushWithForge(ctx context.Context, root string, state workspaceState, newBranch string, remote Forge) error {
 	repository, _, err := openGitWorkspace(root, state)
 	if err != nil {
 		return err
@@ -1110,7 +1110,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		fmt.Fprintln(a.out, "Everything up to date. No local commits to push.")
 		return nil
 	}
-	remoteHead, err := remote.Head(context.Background(), state.Remote, state.Branch)
+	remoteHead, err := remote.Head(ctx, state.Remote, state.Branch)
 	if err != nil {
 		if isRemoteNotFound(err) && state.BaseCommit == "" {
 			remoteHead = ""
@@ -1123,9 +1123,9 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		return err
 	}
 	if prepared != nil && prepared.TargetBranch != state.Branch {
-		targetHead, targetErr := remote.Head(context.Background(), state.Remote, prepared.TargetBranch)
+		targetHead, targetErr := remote.Head(ctx, state.Remote, prepared.TargetBranch)
 		if targetErr == nil && targetHead != prepared.ExpectedProvider {
-			reconciled, reconcileErr := reconcilePreparedGitExport(context.Background(), root, &state, repository, remote, writer, targetHead, prepared)
+			reconciled, reconcileErr := reconcilePreparedGitExport(ctx, root, &state, repository, remote, writer, targetHead, prepared)
 			if reconcileErr != nil {
 				return reconcileErr
 			}
@@ -1151,7 +1151,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		}
 	}
 	if prepared != nil && remoteHead != prepared.ExpectedProvider {
-		reconciled, reconcileErr := reconcilePreparedGitExport(context.Background(), root, &state, repository, remote, writer, remoteHead, prepared)
+		reconciled, reconcileErr := reconcilePreparedGitExport(ctx, root, &state, repository, remote, writer, remoteHead, prepared)
 		if reconcileErr != nil {
 			return reconcileErr
 		}
@@ -1172,7 +1172,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 	}
 	remoteFiles := make(map[string]RemoteFile)
 	if remoteHead != "" {
-		remoteFiles, err = remote.Tree(context.Background(), state.Remote, remoteHead)
+		remoteFiles, err = remote.Tree(ctx, state.Remote, remoteHead)
 		if err != nil {
 			return err
 		}
@@ -1210,11 +1210,11 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		} else if index > 0 {
 			request.Branch = targetBranch
 		}
-		result, err := writer.ApplyCommit(context.Background(), request)
+		result, err := writer.ApplyCommit(ctx, request)
 		if err != nil {
 			return fmt.Errorf("export of local commit %.12s remains prepared for reconciliation: %w", commit.Hash, err)
 		}
-		confirmedHead, err := remote.Head(context.Background(), state.Remote, targetBranch)
+		confirmedHead, err := remote.Head(ctx, state.Remote, targetBranch)
 		if err != nil {
 			return fmt.Errorf("refresh provider head after exporting %.12s: %w", result.CommitID, err)
 		}
@@ -1225,7 +1225,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		if err != nil {
 			return err
 		}
-		if err := verifyRemoteTree(context.Background(), remote, state.Remote, result.CommitID, expectedTree); err != nil {
+		if err := verifyRemoteTree(ctx, remote, state.Remote, result.CommitID, expectedTree); err != nil {
 			return err
 		}
 		receipt := gitExportReceipt{
@@ -1249,7 +1249,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		if err := os.Remove(exportPreparedPath(root)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		remoteFiles, err = remote.Tree(context.Background(), state.Remote, remoteHead)
+		remoteFiles, err = remote.Tree(ctx, state.Remote, remoteHead)
 		if err != nil {
 			return err
 		}

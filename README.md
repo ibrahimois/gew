@@ -55,6 +55,8 @@ Use a prebuilt release archive, or build with Go 1.22 or newer:
 go test ./...
 go build -o gew ./cmd/gew
 ./gew version
+./gew --version
+./gew -v
 ```
 
 The optional local `.git` backend uses the pure-Go `go-git` library. The system
@@ -63,8 +65,9 @@ The optional local `.git` backend uses the pure-Go `go-git` library. The system
 ## Configure a provider
 
 Pass tokens through `GEW_TOKEN` during login to avoid putting them in the
-process argument list. Saved credentials use the operating system's user
-configuration directory with file mode `0600`.
+process argument list. When `--token` is omitted, `gew login` reads
+`GEW_TOKEN`; it does not prompt interactively. Saved credentials use the
+operating system's user configuration directory with file mode `0600`.
 
 | Provider | Login example | Repository form | Push |
 | --- | --- | --- | --- |
@@ -153,6 +156,29 @@ and `.theirs` suffixes.
 | Resolve a merge | `gew merge --continue`, `gew merge --abort` |
 | Push | `gew push`, `gew push --new-branch BRANCH` |
 | Migrate to the local `.git` backend | `gew migrate --to git --dry-run`, then `gew migrate --to git` |
+
+Generated help is available for the whole command tree and for each command:
+
+```sh
+gew help
+gew help commit
+gew commit --help
+```
+
+Flags may appear before or after positional arguments. Use `--` to terminate
+flag parsing when a path begins with `-`, for example `gew add -- -notes.md`.
+Print the release version with `gew version`, `gew --version`, or `gew -v`.
+
+### Shell completion
+
+Generate completion directly from the installed command:
+
+```sh
+source <(gew completion bash)
+source <(gew completion zsh)
+gew completion fish > ~/.config/fish/completions/gew.fish
+gew completion pwsh > gew-completion.ps1
+```
 
 ## Workspace backends
 
