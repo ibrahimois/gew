@@ -1,252 +1,166 @@
-# git ew ("gew")
+# git ew (`gew`)
 
 <p align="center">
   <img src="assets/gew-logo.svg" width="760" alt="git ew (gew) — Git-like, REST-only">
 </p>
 
-**git ew**, invoked as `gew`, is a Git-like, REST-only workspace client for
-hosted Git forges. It is made for environments where the normal `git`
-executable or Git transport cannot be used, but HTTPS access to a forge's API
-is available. Gitea, GitHub, GitLab, Bitbucket Cloud, and Azure DevOps use the same
-provider-neutral workspace engine. GitLab and Bitbucket push remain
-safety-gated as described below.
+`gew` is a Git-like workspace client that talks to hosted Git forges through
+their HTTPS REST APIs. It is designed for environments where the `git`
+executable or Git transport is unavailable, while keeping familiar commands
+such as `clone`, `add`, `commit`, `pull`, and `push`.
 
-Version 0.2 added a real local staging area and local commit queue. Staged file
-content is snapshotted, so editing a file after `gew add` does not silently alter
-the commit. Each local commit is pushed to the configured forge separately, in order, with its
-own message.
+It supports Gitea, GitHub, GitLab, Bitbucket Cloud, and Azure DevOps through one
+workspace engine. GitLab and Bitbucket push are intentionally disabled until
+their concurrency behavior passes live safety verification.
 
-Version 0.3 adds a three-way merge engine to `pull`. It automatically combines
-non-overlapping text edits, creates standard conflict markers for overlapping
-edits, preserves binary conflict sides, and supports merge continue/abort.
+`gew` is not a complete Git replacement. It focuses on everyday file changes,
+local commits, safe synchronization, and recoverable merges—not tags, rebase,
+cherry-pick, submodules, or arbitrary history operations.
 
-Version 0.4 adds provider-neutral REST adapters for Gitea, GitHub, GitLab,
-Bitbucket Cloud, and Azure DevOps, plus the opt-in hybrid backend where a real
-local `.git` repository works alongside Gew's REST synchronization journal.
-
-`gew` is not a reimplementation of Git's object database. It does not support
-rebase, cherry-pick, tags, submodules, or arbitrary historical checkouts.
-
-## A quick sample
+## Quick start
 
 ```sh
-# Download a repository through the Gitea REST API — no .git directory.
+# Configure credentials once.
+export GEW_TOKEN=your-token
+gew login --provider gitea https://gitea.example.com
+unset GEW_TOKEN
+
+# Work with a repository without Git transport.
 gew clone acme/widgets
 cd widgets
 
-# Make a change, stage its exact contents, and create a local queued commit.
 printf '\nREST all the things.\n' >> README.md
 gew add README.md
 gew diff --staged
 gew commit -m "Document the REST workflow"
 
-# Merge any newer changes from main, then publish your queued commit.
+# Merge newer remote work, then publish queued commits.
 gew pull
 gew push
 ```
 
-If `pull` finds overlapping changes, resolve the marked files and finish with
-`gew merge --continue -m "Resolve merge"`, or return to the exact pre-merge
-workspace with `gew merge --abort`.
+Staged content is snapshotted when you run `gew add`, so later edits do not
+silently change the queued commit. Multiple local commits are pushed in order,
+one remote commit at a time.
 
-## Build
+## Install or build
 
-Go 1.22 or newer is required. The optional hybrid backend uses the reviewed
-pure-Go `go-git` engine; it does not require the `git` executable.
+Use a prebuilt release archive, or build with Go 1.22 or newer:
 
 ```sh
 go test ./...
-go build -o gew .
+go build -o gew ./cmd/gew
 ./gew version
 ```
 
-## Configure
+The optional local `.git` backend uses the pure-Go `go-git` library. The system
+`git` executable is not required at runtime.
 
-Create a Gitea personal access token with repository read/write permission. Use
-an environment variable during login to keep the token out of the process
-argument list:
+## Configure a provider
+
+Pass tokens through `GEW_TOKEN` during login to avoid putting them in the
+process argument list. Saved credentials use the operating system's user
+configuration directory with file mode `0600`.
+
+| Provider | Login example | Repository form | Push |
+| --- | --- | --- | --- |
+| Gitea | `gew login --provider gitea https://gitea.example.com` | `owner/repo` | Enabled |
+| GitHub | `gew login --provider github https://github.com` | `owner/repo` | Enabled for non-empty repos |
+| GitLab | `gew login --provider gitlab --auth-kind private-token https://gitlab.com` | `group/subgroup/repo` | Safety-gated |
+| Bitbucket Cloud | `gew login --provider bitbucket --auth-kind basic --username you@example.com https://bitbucket.org` | `workspace/repo` | Safety-gated |
+| Azure DevOps | `gew login --provider azure --auth-kind pat https://dev.azure.com/my-org` | `project/repo` | Enabled |
+
+Authentication notes:
+
+- Gitea accepts token or Bearer authentication.
+- GitHub uses Bearer tokens and supports GitHub Enterprise web URLs.
+- GitLab supports Bearer/OAuth and `private-token` authentication, including
+  self-managed instances and nested namespaces.
+- Bitbucket supports Bearer tokens or Basic authentication with an Atlassian
+  account email. Only Bitbucket Cloud is supported.
+- Azure DevOps supports Microsoft Entra Bearer tokens and PATs. Only Azure
+  DevOps Services is supported, not Azure DevOps Server.
+
+For ephemeral use, skip `login` and set `GEW_SERVER`, `GEW_TOKEN`, and, when
+needed, `GEW_PROVIDER`, `GEW_AUTH_KIND`, and `GEW_USERNAME`.
+
+Confirm the selected profile before cloning:
 
 ```sh
-export GEW_TOKEN=your-token
-./gew login --provider gitea https://gitea.example.com
-unset GEW_TOKEN
-./gew doctor
+gew doctor
 ```
 
-The saved token lives in the operating system's user configuration directory
-with file mode `0600`. For an ephemeral environment, skip `login` and provide
-`GEW_SERVER`, `GEW_TOKEN`, and optionally `GEW_PROVIDER`, `GEW_AUTH_KIND`, and
-`GEW_USERNAME` when running commands. Older profiles migrate in memory to the
-`gitea` provider.
-
-For GitHub.com, use a fine-grained token with repository Contents read/write
-permission:
+## Everyday workflow
 
 ```sh
-export GEW_TOKEN=your-github-token
-./gew login --provider github https://github.com
-unset GEW_TOKEN
-./gew clone OWNER/REPOSITORY
-```
-
-GitHub Enterprise profiles use the instance's web base URL; `gew` maps it to
-the instance's `/api/v3` REST base. GitHub authentication uses Bearer tokens.
-
-GitLab.com and self-managed GitLab profiles support Bearer/OAuth tokens and
-`private-token` authentication. Nested namespaces resolve to stable numeric
-project IDs:
-
-```sh
-export GEW_TOKEN=your-gitlab-token
-./gew login --provider gitlab --auth-kind private-token https://gitlab.com
-unset GEW_TOKEN
-./gew clone group/subgroup/repository
-```
-
-Bitbucket Cloud supports Bearer access tokens and Atlassian API tokens through
-Basic authentication. Basic authentication requires the Atlassian account
-email as `--username`:
-
-```sh
-export GEW_TOKEN=your-atlassian-api-token
-./gew login --provider bitbucket --auth-kind basic \
-  --username account@example.com https://bitbucket.org
-unset GEW_TOKEN
-./gew clone workspace/repository
-```
-
-Azure DevOps Services supports Microsoft Entra bearer tokens and PATs. A PAT
-uses Azure's Basic authentication form and needs repository read/write scope:
-
-```sh
-export GEW_TOKEN=your-azure-token
-./gew login --provider azure --auth-kind pat \
-  https://dev.azure.com/my-organization
-unset GEW_TOKEN
-./gew clone my-project/my-repository
-```
-
-The Azure adapter supports the hosted service at `dev.azure.com` and documented
-legacy `{organization}.visualstudio.com` URLs. Azure DevOps Server/on-premises
-is intentionally outside this adapter's compatibility scope.
-
-## Git-like workflow
-
-```sh
-# Clone an existing or empty repository with the default .gew-only backend.
-./gew clone acme/widgets
-cd widgets
-
-# Edit files, inspect the working tree, and stage selected paths.
 gew status
 gew diff
 gew add src/config.go README.md
-
-# Inspect exactly what is staged, then create a local commit.
 gew diff --staged
 gew commit -m "Update widget configuration"
-
-# Create more local commits if desired, inspect them, then push in order.
 gew log --oneline
-gew push
-
-# Safely download a newer remote snapshot.
 gew pull
+gew push
 ```
 
-If local and remote files both changed, `pull` performs a three-way merge using
-the last synchronized commit as the base. For a conflict:
+Useful variations:
 
 ```sh
-# Inspect files containing <<<<<<< ours / ======= / >>>>>>> theirs.
-gew status
+gew add -A                         # Stage all changes, including deletions
+gew reset src/config.go            # Unstage one path
+gew reset                          # Unstage everything
+gew pull --ff-only                 # Refuse local merges
+gew push --new-branch feature/api  # Create and switch to a remote branch
+```
 
-# Edit each conflicted file, then continue with a local merge commit.
+Commands work from workspace subdirectories. Paths are interpreted relative to
+the current directory, similar to Git pathspecs.
+
+### Pull conflicts
+
+`gew pull` performs a three-way merge when local and remote files both changed.
+Non-overlapping text edits merge automatically. For overlapping edits, resolve
+the conflict markers and continue, or restore the exact pre-merge workspace:
+
+```sh
+gew status
+# Edit files containing <<<<<<< ours / ======= / >>>>>>> theirs.
 gew merge --continue -m "Resolve merge conflicts"
 
-# Or restore the exact pre-merge workspace and local commit queue.
+# Or abandon the merge:
 gew merge --abort
 ```
 
-Binary conflict versions are preserved under `.gew/conflicts/` with `.base`,
-`.ours`, and `.theirs` suffixes. Choose or replace the working file before
-continuing.
+Binary conflict sides are saved under `.gew/conflicts/` with `.base`, `.ours`,
+and `.theirs` suffixes.
 
-Use `gew pull --ff-only` when automation must refuse all local merges.
+## Command reference
 
-To stage all created, modified, and deleted files:
-
-```sh
-gew add -A
-```
-
-To unstage one path or the entire index without changing working files:
-
-```sh
-gew reset src/config.go
-gew reset
-```
-
-To create and switch the workspace to a new remote branch while pushing queued
-commits:
-
-```sh
-gew push --new-branch feature/config
-```
-
-Commands work from any subdirectory because `gew` searches parent directories
-for `.gew/state.json`. Path arguments are interpreted relative to the current
-directory, like Git pathspecs.
-
-## Command mapping
-
-| Git | gew |
+| Git-style task | `gew` command |
 | --- | --- |
-| `git clone URL` | `gew clone OWNER/REPO` |
-| `git status` | `gew status` |
-| `git diff` | `gew diff` |
-| `git diff --staged` | `gew diff --staged` |
-| `git add PATH` | `gew add PATH` |
-| `git add -A` | `gew add -A` |
-| `git reset PATH` | `gew reset PATH` |
-| `git commit -m MSG` | `gew commit -m MSG` |
-| `git log --oneline` | `gew log --oneline` |
-| `git push` | `gew push` |
-| `git pull` | `gew pull` |
-| `git pull --ff-only` | `gew pull --ff-only` |
-| `git merge --continue` | `gew merge --continue` |
-| `git merge --abort` | `gew merge --abort` |
-| Create a local `.git` workspace | `gew clone --backend git OWNER/REPO` |
-| Migrate a clean v3 workspace | `gew migrate --to git --dry-run` then `gew migrate --to git` |
+| Clone | `gew clone OWNER/REPO [DIRECTORY]` |
+| Clone with a local `.git` | `gew clone --backend git OWNER/REPO [DIRECTORY]` |
+| Inspect changes | `gew status`, `gew diff`, `gew diff --staged` |
+| Stage | `gew add PATH...`, `gew add -A` |
+| Unstage | `gew reset [PATH...]` |
+| Commit | `gew commit -m MESSAGE` |
+| View local history | `gew log --oneline` |
+| Pull | `gew pull`, `gew pull --ff-only` |
+| Resolve a merge | `gew merge --continue`, `gew merge --abort` |
+| Push | `gew push`, `gew push --new-branch BRANCH` |
+| Migrate to the local `.git` backend | `gew migrate --to git --dry-run`, then `gew migrate --to git` |
 
-## Local model
+## Workspace backends
 
-`gew` keeps private metadata under `.gew/`:
+The default backend stores its index, immutable objects, commit queue, and
+merge recovery data under `.gew/` and creates no `.git` directory:
 
 ```text
-.gew/
-  state.json       provider/repository identity, branch, remote base, queue, local history
-  index.json       currently staged paths
-  objects/         immutable staged and baseline file snapshots
-  commits/         local commit records and remote push results
-  merge.json       recoverable in-progress merge state
-  conflicts/       binary base/ours/theirs files during conflicts
+working files -> gew add -> staging index -> gew commit -> local queue -> gew push -> forge API
 ```
 
-The local flow is:
-
-```text
-working files -> gew add -> staging index -> gew commit -> local queue -> gew push -> forge REST API
-```
-
-The `.gew` directory and any `.git` directory are excluded from status, staging,
-and pushes. Tokens are never written into a workspace.
-
-## Local workspace backends
-
-The default `gew` backend keeps its index, immutable objects, local commit
-queue, and merge recovery under `.gew/`; it creates no `.git` directory. The
-opt-in hybrid backend creates a standards-compliant local `.git` repository:
+The opt-in hybrid backend creates a standards-compliant local `.git` repository
+for editors and Git-aware tools:
 
 ```sh
 gew clone --backend git acme/widgets widgets
@@ -258,25 +172,13 @@ gew commit -m "Update documentation"
 gew push
 ```
 
-In hybrid mode, `.git` owns the local index, objects, commits, branch, and
-worktree history. `.gew` remains mandatory: it owns the provider identity,
-actual hosted head, crash-recovery journal, and one receipt mapping each local
-Git OID to its provider-created commit ID. Those IDs often differ because the
-forge creates its own commit metadata. Deleting `.gew` leaves readable local
-Git history but destroys the synchronization mappings needed for safe push and
-pull.
+In hybrid mode, `.git` owns local history while `.gew` remains the remote
+synchronization journal. Provider-created commit IDs may differ from local Git
+OIDs, so deleting `.gew` removes the mappings required for safe push and pull.
+All network access still uses REST APIs; `gew` does not invoke Git transport,
+hooks, filters, credential helpers, SSH, or smart HTTP.
 
-All network access still uses the provider REST adapter. Production code does
-not invoke `git`, Git hooks, filters, credential helpers, submodule commands,
-SSH, or smart HTTP. Git-aware editors may inspect and edit the local repository,
-but `gew push` accepts only history descending from its private tracking ref in
-first-parent order and fails closed on unsupported graphs. Gew records a local
-merge's final tree as a linear provider commit; it does not claim the hosted
-repository has the same merge topology.
-
-To migrate an existing version-1, version-2, or version-3 `.gew` workspace,
-empty the staging index, make the worktree clean, and ensure the remote still
-matches the recorded base:
+To migrate an older clean `.gew` workspace:
 
 ```sh
 gew migrate --to git --dry-run \
@@ -285,165 +187,61 @@ gew migrate --to git \
   --author-name "Example User" --author-email user@example.invalid
 ```
 
-The dry-run performs all reads, object/hash checks, queue reconstruction, and
-remote-head validation without writing. Migration refuses any existing `.git`,
-replays every queued Gew commit separately, and retains checksummed source data
-under `.gew/legacy/v<source-version>-<migration-id>/`. Reverse migration and
-implicit adoption of an existing Git repository are not supported.
+Migration refuses an existing `.git`, validates the remote head, replays queued
+commits, and keeps checksummed source data under `.gew/legacy/`. Reverse
+migration and implicit adoption of an existing Git repository are unsupported.
 
-## Provider adapter contract
+## Safety model
 
-Every remote adapter implements the small `Forge` base contract: identity,
-connection probing, canonical repository resolution, and exact-revision head,
-tree, and blob reads. Native archives and writes are separate structural roles.
-Adapters with a safe exact-revision archive implement `ForgeSnapshotter`;
-others use the shared deterministic Tree+Blob ZIP fallback. Adapters implement
-`ForgeCommitWriter` only when they can preserve one local commit as one atomic
-multi-file remote commit.
+- Push refuses a changed remote head; provider policy and validation errors are
+  not misreported as concurrency failures.
+- Every enabled push is one atomic multi-file remote commit per queued local
+  commit. Partial queues checkpoint after each confirmed commit.
+- Accepted-but-lost responses are reconciled before retrying, preventing
+  duplicate remote commits.
+- Pull refuses staged changes. Unstaged work is merged only when it can be
+  recovered or explicitly resolved.
+- Archive extraction rejects path traversal and symbolic links. Staging rejects
+  paths outside the workspace and internal `.gew` or `.git` files.
+- Tokens are never stored in a workspace.
 
-`Push` and `BranchCreate` are explicit safety/product gates. Every enabled
-write goes through the shared validated writer, which normalizes and copies the
-request, rejects unsafe or duplicate paths before transmission, and validates
-the result. The engine supplies an expected head. A provider either updates the
-reference conditionally or returns parents proving that the new commit extends
-that exact head. Candidate provider conflicts become `ErrStaleHead` only after
-a fresh branch read confirms that the head changed; unrelated validation and
-branch-policy responses remain provider errors.
+Empty repositories are cloneable. Gitea and Azure can create the first commit.
+GitHub's REST Git database API cannot create the first reference, so initialize
+an empty GitHub repository elsewhere, then run `gew pull` before pushing.
 
-To add a provider:
+## Provider status
 
-1. Add its `ForgeKind` constant and implement the base `Forge` reader methods
-   with `httpRequester`.
-2. Implement `ForgeSnapshotter` only for a safe native archive pinned to an
-   exact revision; otherwise rely on the shared fallback.
-3. Implement `ForgeCommitWriter` only for atomic multi-file commits that honor
-   the expected-head/parent invariant. Keep `Push` false until disposable-repo
-   concurrency and ambiguous-response tests pass.
-4. Add one `forgeDefinition` catalog entry containing its default auth kind
-   and factory.
-5. Invoke the shared reader/snapshot/writer conformance helpers and retain
-   provider-specific HTTP payload, pagination, authentication, redaction, and
-   conflict fixtures.
-6. Run the full offline suite, then the provider's opt-in live tests against a
-   disposable repository.
-
-Staging, diff, local commits, and three-way merge contain no provider-specific
-behavior. GitLab and Bitbucket continue to implement gated raw writers for
-fixture coverage, but their `Push` capability remains false pending live safety
-verification.
-
-Workspace state version 3 stores the provider and provider-neutral repository
-identity, but never authentication credentials. State version 4 adds the local
-backend and hybrid synchronization pointers. Existing version-1/2/3 workspaces
-default to the original backend without rewriting their queued commits,
-history, or object snapshots.
-
-## Safety behavior
-
-- `pull` refuses staged changes. Unstaged changes are merged when the remote has
-  advanced. Additional unstaged changes on top of queued commits must be
-  committed or restored first.
-- Non-overlapping text edits merge automatically. Conflicting edits receive
-  diff3-style base/ours/theirs markers.
-- `merge --abort` restores the exact pre-merge files, state, queue, and an empty
-  staging index.
-- When remote changes overlap queued local commits, successful pulls replace the
-  queue with one synthetic merge commit. Superseded commits remain visible in
-  `gew log`.
-- `push` refuses when the remote branch has advanced since clone or pull.
-- Existing remote files are updated or deleted using their current blob SHA.
-- A partially successful multi-commit push is checkpointed after each remote
-  commit. Retrying continues with the remaining queue.
-- Archive extraction rejects path traversal and symbolic links.
-- Staging rejects paths outside the workspace and internal `.gew`/`.git` paths.
-- Empty repositories are cloneable. Gitea can create the initial branch and
-  commit, as can Azure DevOps through its documented all-zero ref update;
-  GitHub initial push is intentionally refused as described below.
-
-## Gitea compatibility
-
-Push uses the atomic multi-file endpoint:
-
-```text
-POST /api/v1/repos/{owner}/{repo}/contents
-```
-
-Your instance's `swagger.v1.json` should contain the operation
-`repoChangeFiles`. Clone and pull also require the repository archive, branch,
-and recursive tree endpoints.
-
-## GitHub compatibility
-
-GitHub pushes use the Git database API: blobs are created first, then one tree
-and one commit, followed by a non-force reference update. This preserves one
-queued local commit as one GitHub commit and rejects a concurrently advanced
-branch. Recursive tree truncation falls back to walking each subtree, and
-archive redirects cannot forward credentials to another host.
-
-GitHub REST cannot create a reference in an empty repository. Empty GitHub
-repositories can be cloned as prepared workspaces, but an initial `gew push`
-is refused before any Git object is created and leaves every local commit
-queued. Initialize the repository through GitHub or another Git client, then
-run `gew pull` before pushing with `gew`.
-
-## GitLab compatibility
-
-GitLab clone and pull use exact-commit ZIP archives, paginated recursive trees,
-and stable numeric project IDs, including projects in nested namespaces. The
-adapter contains a one-request batched commit implementation with real
-per-file `last_commit_id` locks for updates and deletes.
-
-GitLab does not document a branch-wide compare-and-swap field for its Commits
-API. Push therefore remains disabled until an opt-in live concurrency suite
-proves that a stale same-file write cannot overwrite remote bytes. `gew push`
-returns a provider-capability error without dequeuing local commits.
-
-## Bitbucket Cloud compatibility
-
-Bitbucket Cloud clone and pull walk paginated Source API directories pinned to
-one immutable commit, fetch exact file bytes, and synthesize the safe ZIP
-snapshot consumed by the shared workspace engine. Symlinks, subrepositories,
-untrusted pagination URLs, and inconsistent commit metadata are rejected.
-
-The adapter fixture-tests one streamed multipart request containing binary
-create/update parts, repeated delete fields, a message, target branch, and the
-expected `parents` value. Bitbucket Cloud push remains disabled until a live
-stale-parent and lost-response suite proves it cannot overwrite concurrent
-work or duplicate commits. This adapter does not support Bitbucket Data Center.
-
-## Azure DevOps compatibility
-
-Azure clone and pull resolve stable project and repository IDs, then list and
-fetch content at one exact commit. Push sends every queued commit as one Pushes
-API request containing all file changes and the fully qualified target ref.
-Every existing-branch update carries the exact workspace head in
-`refUpdates[].oldObjectId`; Azure rejects stale updates atomically rather than
-silently rebasing them. Binary content is Base64 encoded and deletes omit
-`newContent`.
-
-Microsoft Entra bearer tokens are preferred. PATs are supported with
-`--auth-kind pat`. Branch policies and missing repository permissions are
-reported as provider errors without dequeuing the local commit. This adapter is
-for Azure DevOps Services only, not Azure DevOps Server.
+| Provider | Clone/pull strategy | Push safety |
+| --- | --- | --- |
+| Gitea | Native exact-revision archive and recursive tree | Atomic multi-file endpoint; enabled |
+| GitHub | Native archive and Git tree API | Non-force conditional ref update; enabled for non-empty repos |
+| GitLab | Native archive and paginated tree | Disabled pending live branch-wide concurrency proof |
+| Bitbucket Cloud | Exact-commit tree and shared ZIP fallback | Disabled pending live stale-parent/lost-response proof |
+| Azure DevOps | Exact-commit item listing and shared ZIP fallback | Exact `oldObjectId` ref update; enabled |
 
 ## Current limitations
 
-- The merge engine is line-oriented. It does not perform semantic language-aware
-  merges or rename detection.
-- Synthetic merge commits are linear Gitea commits because the REST contents API
-  cannot create a native two-parent Git merge commit.
-- `log` shows commits created locally by this `gew` workspace. It is not a full
-  remote-history browser.
-- Symbolic links, submodules, executable-bit-only changes, and empty directories
-  are not tracked.
-- Renames are represented as delete plus create.
-- Large repositories are downloaded as complete ZIP snapshots.
-- Hybrid mode is opt-in. Live export/pull conformance has passed on Gitea and
-  GitHub; providers whose push capability is safety-gated remain read-only, and
-  Azure live conformance requires operator-supplied Azure credentials.
-- Hybrid pull linearizes queued local work onto a new remote anchor. Arbitrary
-  DAG export, octopus merges, hooks, filters, LFS, worktrees, and Git transport
-  are unsupported.
-- GitHub empty repositories require their first branch to be initialized
-  outside `gew`.
-- The diff engine is line-oriented and intentionally simpler than Git's diff.
+- No rebase, cherry-pick, tags, submodules, LFS, worktrees, or arbitrary DAG
+  export.
+- Merges and diffs are line-oriented, with no semantic merge or rename
+  detection. Renames appear as delete plus create.
+- Symlinks, submodules, executable-bit-only changes, and empty directories are
+  not tracked.
+- `gew log` shows commits created by the current workspace, not full remote
+  history.
+- Hybrid merges are exported as linear provider commits; hosted topology may
+  differ from local Git topology.
+- Large repositories require full snapshot downloads.
+
+## Adding a provider
+
+Adapters share one small contract: identity, connection probing, repository
+resolution, and exact-revision head/tree/blob reads. A new provider should:
+
+1. Add one `ForgeKind` and one entry in `internal/forge/registry`.
+2. Implement the required reader methods with the shared HTTP requester.
+3. Implement native snapshots only when the archive is safely pinned to an
+   exact revision; otherwise use the shared Tree+Blob fallback.
+4. Enable the writer only after atomic multi-file, stale-head, and
+   accepted-but-lost behavior pass disposable-repository tests.
+5. Run the shared conformance tests plus provider-specific HTTP fixtures.
