@@ -1,7 +1,11 @@
 # git ew (`gew`)
 
 <p align="center">
-  <img src="assets/gew-logo.svg" width="760" alt="git ew (gew) — Git-like, REST-only">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/gew-logo-minimal-on-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/gew-logo-minimal.png">
+    <img src="assets/gew-logo-minimal.png" width="760" alt="gew — Git-like, REST-only">
+  </picture>
 </p>
 
 `gew` is a Git-like workspace client that talks to hosted Git forges through
