@@ -757,8 +757,97 @@ func TestVersionOneWorkspaceMigratesInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Version != stateVersion || state.Files == nil {
+	if state.Version != 1 || state.Backend != WorkspaceGew || state.Files == nil {
 		t.Fatalf("legacy state was not migrated: %#v", state)
+	}
+}
+
+func TestVersionTwoWorkspaceMigrationPreservesProviderNeutralIdentity(t *testing.T) {
+	originalDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(originalDirectory)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".gew"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"version":2,"server":"https://example.test","owner":"team","repository":"demo","branch":"main","base_commit":"abc","files":{},"queue":["queued"],"history":["queued"]}`
+	if err := os.WriteFile(filepath.Join(root, ".gew", "state.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := findWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != 2 || state.Backend != WorkspaceGew || state.Provider != ForgeGitea || state.Remote.Namespace != "team" || state.Remote.Name != "demo" {
+		t.Fatalf("legacy identity was not migrated: %#v", state)
+	}
+	if len(state.Queue) != 1 || len(state.History) != 1 || state.BaseCommit != "abc" {
+		t.Fatalf("legacy queue/history/base were not preserved: %#v", state)
+	}
+	if err := saveState(root, state); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".gew", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "token") {
+		t.Fatalf("workspace state contains a credential field: %s", data)
+	}
+	var persisted workspaceState
+	if err := json.Unmarshal(data, &persisted); err != nil || persisted.Version != stateVersion {
+		t.Fatalf("explicit mutation did not upgrade state to version %d: %#v, %v", stateVersion, persisted, err)
+	}
+}
+
+func TestProfileMigrationDefaultsToGiteaInMemory(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("GEW_CONFIG", configPath)
+	t.Setenv("GEW_SERVER", "")
+	t.Setenv("GEW_TOKEN", "")
+	legacy := `{"current":"default","profiles":{"default":{"url":"https://example.test","token":"secret"}}}`
+	if err := os.WriteFile(configPath, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := profileFromConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Provider != ForgeGitea || p.AuthKind != AuthToken {
+		t.Fatalf("legacy profile was not migrated in memory: %#v", p)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "provider") {
+		t.Fatalf("read-only migration rewrote profile: %s", data)
+	}
+}
+
+func TestFutureWorkspaceVersionFailsClosed(t *testing.T) {
+	originalDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(originalDirectory)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".gew"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gew", "state.json"), []byte(`{"version":999,"files":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := findWorkspace(); err == nil || !strings.Contains(err.Error(), "unsupported workspace state version 999") {
+		t.Fatalf("future version error = %v", err)
 	}
 }
 

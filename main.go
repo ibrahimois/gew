@@ -3,8 +3,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -24,14 +23,17 @@ import (
 )
 
 const (
-	toolVersion  = "0.3.0"
-	stateVersion = 2
+	toolVersion  = "0.4.0"
+	stateVersion = 4
 )
 
 type profile struct {
-	URL      string `json:"url"`
-	Token    string `json:"token"`
-	Insecure bool   `json:"insecure,omitempty"`
+	Provider ForgeKind `json:"provider,omitempty"`
+	URL      string    `json:"url"`
+	Token    string    `json:"token"`
+	AuthKind AuthKind  `json:"auth_kind,omitempty"`
+	Username string    `json:"username,omitempty"`
+	Insecure bool      `json:"insecure,omitempty"`
 }
 
 type config struct {
@@ -47,113 +49,24 @@ type fileState struct {
 
 type workspaceState struct {
 	Version    int                  `json:"version"`
-	Server     string               `json:"server"`
-	Owner      string               `json:"owner"`
-	Repository string               `json:"repository"`
+	Backend    WorkspaceBackendKind `json:"backend,omitempty"`
+	Provider   ForgeKind            `json:"provider"`
+	Remote     RepositoryRef        `json:"remote"`
+	Server     string               `json:"server,omitempty"`
+	Owner      string               `json:"owner,omitempty"`
+	Repository string               `json:"repository,omitempty"`
 	Branch     string               `json:"branch"`
 	BaseCommit string               `json:"base_commit"`
 	Files      map[string]fileState `json:"files"`
 	Queue      []string             `json:"queue,omitempty"`
 	History    []string             `json:"history,omitempty"`
 	LocalHead  string               `json:"local_head,omitempty"`
-}
-
-type client struct {
-	baseURL string
-	token   string
-	http    *http.Client
-}
-
-type apiError struct {
-	Status int
-	Method string
-	URL    string
-	Body   string
-}
-
-func (e *apiError) Error() string {
-	message := strings.TrimSpace(e.Body)
-	if message == "" {
-		message = http.StatusText(e.Status)
-	}
-	return fmt.Sprintf("Gitea API %s %s returned %d: %s", e.Method, e.URL, e.Status, message)
-}
-
-func isAPINotFound(err error) bool {
-	var apiErr *apiError
-	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
-}
-
-type repository struct {
-	DefaultBranch string `json:"default_branch"`
-	Empty         bool   `json:"empty"`
-}
-
-type branchResponse struct {
-	Name   string `json:"name"`
-	Commit struct {
-		ID  string `json:"id"`
-		SHA string `json:"sha"`
-	} `json:"commit"`
-}
-
-func (b branchResponse) commitSHA() string {
-	if b.Commit.ID != "" {
-		return b.Commit.ID
-	}
-	return b.Commit.SHA
-}
-
-type treeEntry struct {
-	Path string `json:"path"`
-	SHA  string `json:"sha"`
-	Type string `json:"type"`
-	Mode string `json:"mode"`
-}
-
-type treeResponse struct {
-	Tree       []treeEntry `json:"tree"`
-	Truncated  bool        `json:"truncated"`
-	Page       int         `json:"page"`
-	TotalCount int         `json:"total_count"`
-}
-
-type blobResponse struct {
-	Content  string `json:"content"`
-	Encoding string `json:"encoding"`
-	SHA      string `json:"sha"`
-}
-
-type commitDetails struct {
-	SHA    string `json:"sha"`
-	Commit struct {
-		Message string `json:"message"`
-	} `json:"commit"`
-	Parents []struct {
-		SHA string `json:"sha"`
-	} `json:"parents"`
-	Files []struct {
-		Filename string `json:"filename"`
-	} `json:"files"`
+	Hybrid     *hybridState         `json:"hybrid,omitempty"`
 }
 
 type change struct {
 	Kind string `json:"kind"`
 	Path string `json:"path"`
-}
-
-type changeOperation struct {
-	Operation string `json:"operation"`
-	Path      string `json:"path"`
-	Content   string `json:"content,omitempty"`
-	SHA       string `json:"sha,omitempty"`
-}
-
-type changeFilesRequest struct {
-	Branch    string            `json:"branch"`
-	NewBranch string            `json:"new_branch,omitempty"`
-	Message   string            `json:"message"`
-	Files     []changeOperation `json:"files"`
 }
 
 type app struct {
@@ -204,6 +117,8 @@ func (a app) run(args []string) error {
 		return a.pull(args[1:])
 	case "merge":
 		return a.merge(args[1:])
+	case "migrate":
+		return a.migrate(args[1:])
 	case "push":
 		return a.push(args[1:])
 	default:
@@ -212,31 +127,38 @@ func (a app) run(args []string) error {
 }
 
 func (a app) usage() {
-	fmt.Fprint(a.out, `gew - a small REST-only workspace client for Gitea
+	fmt.Fprint(a.out, `gew - a small REST-only workspace client for hosted Git forges
 
 Usage:
-  gew login [--name NAME] [--token TOKEN] [--insecure] URL
+  gew login [--provider PROVIDER] [--name NAME] [--token TOKEN] [--auth-kind KIND] [--username USER] [--insecure] URL
   gew doctor
-  gew clone [--branch BRANCH] OWNER/REPO [DIRECTORY]
+  gew clone [--branch BRANCH] [--backend gew|git] OWNER/REPO [DIRECTORY]
   gew status [--json]
   gew add [-A|--all] PATH...
   gew reset [PATH...]
   gew diff [--staged]
-  gew commit -m MESSAGE
+  gew commit -m MESSAGE [--author-name NAME --author-email EMAIL]
   gew log [--oneline]
   gew pull [--ff-only]
   gew merge (--abort | --continue [-m MESSAGE])
+  gew migrate --to git [--dry-run] [--author-name NAME --author-email EMAIL]
   gew push [--new-branch BRANCH]
   gew version
 
 Environment:
-  GEW_SERVER   Override the configured Gitea URL
+	GEW_SERVER   Override the configured provider URL
   GEW_TOKEN    Override the configured access token
+	GEW_PROVIDER Override the configured provider kind
+	GEW_AUTH_KIND Override the configured authentication kind
+	GEW_USERNAME Override the configured authentication username
   GEW_PROFILE  Select a saved login profile
   GEW_CONFIG   Override the config file path
+  GEW_AUTHOR_NAME  Local Git commit author name for the hybrid backend
+  GEW_AUTHOR_EMAIL Local Git commit author email for the hybrid backend
 
-gew uses Git-like staging and local queued commits, backed by Gitea's REST API.
-It does not implement Git's object database, rebase, or native merge commits.
+gew uses Git-like staging and local queued commits, backed by forge REST APIs.
+The default gew backend uses .gew only. The opt-in git backend uses a local
+.git object database while all remote access still goes through forge REST APIs.
 `)
 }
 
@@ -244,13 +166,20 @@ func (a app) login(args []string) error {
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
 	flags.SetOutput(a.errOut)
 	name := flags.String("name", "default", "profile name")
+	providerFlag := flags.String("provider", string(ForgeGitea), "provider kind")
 	tokenFlag := flags.String("token", "", "access token (prompted if omitted)")
+	authKindFlag := flags.String("auth-kind", "", "authentication kind")
+	username := flags.String("username", "", "authentication username")
 	insecure := flags.Bool("insecure", false, "skip TLS verification")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 1 {
-		return errors.New("usage: gew login [--name NAME] [--token TOKEN] [--insecure] URL")
+		return errors.New("usage: gew login [--provider PROVIDER] [--name NAME] [--token TOKEN] [--auth-kind KIND] [--username USER] [--insecure] URL")
+	}
+	kind, err := normalizeForgeKind(*providerFlag)
+	if err != nil {
+		return err
 	}
 
 	server, err := normalizeServerURL(flags.Arg(0))
@@ -265,6 +194,19 @@ func (a app) login(args []string) error {
 		return errors.New("access token required; pass --token or set GEW_TOKEN")
 	}
 
+	authKind := AuthKind(strings.TrimSpace(*authKindFlag))
+	if authKind == "" {
+		authKind = defaultAuthKind(kind)
+	}
+	p := profile{Provider: kind, URL: server, Token: token, AuthKind: authKind, Username: strings.TrimSpace(*username), Insecure: *insecure}
+	remote, err := forgeFromProfile(p)
+	if err != nil {
+		return err
+	}
+	if err := remote.Probe(context.Background()); err != nil {
+		return fmt.Errorf("connection test failed: %w", err)
+	}
+
 	cfg, cfgPath, err := readConfig()
 	if err != nil {
 		return err
@@ -273,19 +215,11 @@ func (a app) login(args []string) error {
 		cfg.Profiles = make(map[string]profile)
 	}
 	cfg.Current = *name
-	cfg.Profiles[*name] = profile{URL: server, Token: token, Insecure: *insecure}
+	cfg.Profiles[*name] = p
 	if err := writeConfig(cfgPath, cfg); err != nil {
 		return err
 	}
-
-	c := newClient(cfg.Profiles[*name])
-	var version struct {
-		Version string `json:"version"`
-	}
-	if err := c.getJSON("/api/v1/version", &version); err != nil {
-		return fmt.Errorf("profile saved, but connection test failed: %w", err)
-	}
-	fmt.Fprintf(a.out, "Saved profile %q for %s (Gitea %s).\n", *name, server, version.Version)
+	fmt.Fprintf(a.out, "Saved profile %q for %s (%s).\n", *name, server, kind)
 	if *insecure {
 		fmt.Fprintln(a.errOut, "Warning: TLS certificate verification is disabled for this profile.")
 	}
@@ -296,17 +230,14 @@ func (a app) doctor(args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: gew doctor")
 	}
-	c, err := clientFromConfig()
+	remote, p, err := forgeFromConfig()
 	if err != nil {
 		return err
 	}
-	var version struct {
-		Version string `json:"version"`
-	}
-	if err := c.getJSON("/api/v1/version", &version); err != nil {
+	if err := remote.Probe(context.Background()); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Connected to %s\nGitea version: %s\nAuthentication: token accepted\n", c.baseURL, version.Version)
+	fmt.Fprintf(a.out, "Connected to %s\nProvider: %s\nAuthentication: credentials accepted\n", p.URL, remote.Kind())
 	return nil
 }
 
@@ -314,17 +245,26 @@ func (a app) clone(args []string) error {
 	flags := flag.NewFlagSet("clone", flag.ContinueOnError)
 	flags.SetOutput(a.errOut)
 	branchFlag := flags.String("branch", "", "branch to download")
+	backendFlag := flags.String("backend", string(WorkspaceGew), "local workspace backend (gew or git)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() < 1 || flags.NArg() > 2 {
-		return errors.New("usage: gew clone [--branch BRANCH] OWNER/REPO [DIRECTORY]")
+		return errors.New("usage: gew clone [--branch BRANCH] [--backend gew|git] OWNER/REPO [DIRECTORY]")
 	}
-	owner, repo, err := parseRepository(flags.Arg(0))
+	backend, err := normalizeWorkspaceBackend(WorkspaceBackendKind(*backendFlag))
 	if err != nil {
 		return err
 	}
-	destination := repo
+	remote, _, err := forgeFromConfig()
+	if err != nil {
+		return err
+	}
+	repositoryRef, repoInfo, err := remote.ResolveRepository(context.Background(), flags.Arg(0))
+	if err != nil {
+		return err
+	}
+	destination := repositoryRef.Name
 	if flags.NArg() == 2 {
 		destination = flags.Arg(1)
 	}
@@ -333,15 +273,6 @@ func (a app) clone(args []string) error {
 		return err
 	}
 	if err := ensureEmptyDestination(absDestination); err != nil {
-		return err
-	}
-	c, err := clientFromConfig()
-	if err != nil {
-		return err
-	}
-
-	var repoInfo repository
-	if err := c.getJSON(repoAPIPath(owner, repo), &repoInfo); err != nil {
 		return err
 	}
 	branch := *branchFlag
@@ -356,24 +287,31 @@ func (a app) clone(args []string) error {
 			return err
 		}
 		state := workspaceState{
-			Version: stateVersion, Server: c.baseURL, Owner: owner, Repository: repo,
-			Branch: branch, BaseCommit: "", Files: make(map[string]fileState),
+			Version: stateVersion, Provider: remote.Kind(), Remote: repositoryRef,
+			Backend: backend, Branch: branch, BaseCommit: "", Files: make(map[string]fileState),
+		}
+		state.syncLegacyIdentity()
+		if backend == WorkspaceGit {
+			if err := initializeGitWorkspace(absDestination, &state, true); err != nil {
+				_ = os.RemoveAll(filepath.Join(absDestination, ".git"))
+				return err
+			}
 		}
 		if err := saveState(absDestination, state); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.out, "Prepared empty %s/%s workspace on %s in %s\n", owner, repo, branch, absDestination)
+		fmt.Fprintf(a.out, "Prepared empty %s workspace on %s in %s\n", repositoryRef.DisplayName(), branch, absDestination)
 		return nil
 	}
-	commit, err := c.branchCommit(owner, repo, branch)
+	commit, err := remote.Head(context.Background(), repositoryRef, branch)
 	if err != nil {
 		return err
 	}
-	archive, err := c.download(archiveAPIPath(owner, repo, branch))
+	archive, err := remote.Snapshot(context.Background(), repositoryRef, commit)
 	if err != nil {
 		return err
 	}
-	remoteFiles, err := c.tree(owner, repo, commit)
+	remoteFiles, err := remote.Tree(context.Background(), repositoryRef, commit)
 	if err != nil {
 		return err
 	}
@@ -396,8 +334,15 @@ func (a app) clone(args []string) error {
 		return err
 	}
 	state := workspaceState{
-		Version: stateVersion, Server: c.baseURL, Owner: owner, Repository: repo,
-		Branch: branch, BaseCommit: commit, Files: mergeFileMetadata(localFiles, remoteFiles),
+		Version: stateVersion, Provider: remote.Kind(), Remote: repositoryRef,
+		Backend: backend, Branch: branch, BaseCommit: commit, Files: mergeFileMetadata(localFiles, remoteBlobIDs(remoteFiles)),
+	}
+	state.syncLegacyIdentity()
+	if backend == WorkspaceGit {
+		if err := initializeGitWorkspace(absDestination, &state, false); err != nil {
+			_ = os.RemoveAll(filepath.Join(absDestination, ".git"))
+			return err
+		}
 	}
 	if err := saveState(absDestination, state); err != nil {
 		return err
@@ -405,7 +350,20 @@ func (a app) clone(args []string) error {
 	if err := ensureBaselineObjects(absDestination, state.Files); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.out, "Downloaded %s/%s (%s at %.12s) into %s\n", owner, repo, branch, commit, absDestination)
+	if backend == WorkspaceGit && state.Hybrid.LastLocalOID != "" {
+		paths := make([]string, 0, len(state.Files))
+		for filePath := range state.Files {
+			paths = append(paths, filePath)
+		}
+		sort.Strings(paths)
+		if err := saveGitExportReceipt(absDestination, gitExportReceipt{
+			Version: exportReceiptVersion, LocalOID: state.Hybrid.LastLocalOID, ProviderID: commit,
+			ProviderBase: commit, Message: "imported remote snapshot", Paths: paths,
+		}); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(a.out, "Downloaded %s (%s at %.12s) into %s\n", repositoryRef.DisplayName(), branch, commit, absDestination)
 	return nil
 }
 
@@ -422,6 +380,9 @@ func (a app) status(args []string) error {
 	root, state, err := findWorkspace()
 	if err != nil {
 		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitStatus(root, state, *asJSON)
 	}
 	index, err := loadIndex(root)
 	if err != nil {
@@ -447,7 +408,7 @@ func (a app) status(args []string) error {
 			Unstaged   []change        `json:"unstaged"`
 			Merging    bool            `json:"merging"`
 			Conflicts  []mergeConflict `json:"conflicts,omitempty"`
-		}{state.Owner + "/" + state.Repository, state.Branch, state.BaseCommit, len(state.Queue), stagedChanges, unstagedChanges, mergeState != nil, nil}
+		}{state.Remote.DisplayName(), state.Branch, state.BaseCommit, len(state.Queue), stagedChanges, unstagedChanges, mergeState != nil, nil}
 		if mergeState != nil {
 			payload.Conflicts = mergeState.Conflicts
 		}
@@ -455,7 +416,7 @@ func (a app) status(args []string) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(payload)
 	}
-	fmt.Fprintf(a.out, "On branch %s\nRepository: %s/%s\n", state.Branch, state.Owner, state.Repository)
+	fmt.Fprintf(a.out, "On branch %s\nRepository: %s (%s)\n", state.Branch, state.Remote.DisplayName(), state.Provider)
 	if len(state.Queue) > 0 {
 		fmt.Fprintf(a.out, "Your branch has %d unpushed gew commit(s).\n", len(state.Queue))
 	}
@@ -496,6 +457,13 @@ func (a app) pull(args []string) error {
 	if err != nil {
 		return err
 	}
+	if state.Backend == WorkspaceGit {
+		remote, err := forgeForWorkspace(state)
+		if err != nil {
+			return err
+		}
+		return a.gitPull(root, state, remote, *ffOnly)
+	}
 	index, err := loadIndex(root)
 	if err != nil {
 		return err
@@ -517,13 +485,13 @@ func (a app) pull(args []string) error {
 	if len(state.Queue) != 0 && len(changes) != 0 {
 		return errors.New("workspace has both unpushed commits and additional unstaged changes; commit or restore the unstaged changes first")
 	}
-	c, err := clientForWorkspace(state)
+	remote, err := forgeForWorkspace(state)
 	if err != nil {
 		return err
 	}
-	commit, err := c.branchCommit(state.Owner, state.Repository, state.Branch)
+	commit, err := remote.Head(context.Background(), state.Remote, state.Branch)
 	if err != nil {
-		if isAPINotFound(err) && state.BaseCommit == "" {
+		if isRemoteNotFound(err) && state.BaseCommit == "" {
 			fmt.Fprintln(a.out, "Already up to date (remote repository is empty).")
 			return nil
 		}
@@ -537,13 +505,13 @@ func (a app) pull(args []string) error {
 		if *ffOnly {
 			return errors.New("fast-forward pull is not possible with local changes or unpushed commits")
 		}
-		return a.mergeRemote(root, state, c, commit, len(changes) != 0)
+		return a.mergeRemote(root, state, remote, commit, len(changes) != 0)
 	}
-	archive, err := c.download(archiveAPIPath(state.Owner, state.Repository, state.Branch))
+	archive, err := remote.Snapshot(context.Background(), state.Remote, commit)
 	if err != nil {
 		return err
 	}
-	remoteFiles, err := c.tree(state.Owner, state.Repository, commit)
+	remoteFiles, err := remote.Tree(context.Background(), state.Remote, commit)
 	if err != nil {
 		return err
 	}
@@ -566,7 +534,7 @@ func (a app) pull(args []string) error {
 		return err
 	}
 	state.BaseCommit = commit
-	state.Files = mergeFileMetadata(localFiles, remoteFiles)
+	state.Files = mergeFileMetadata(localFiles, remoteBlobIDs(remoteFiles))
 	if err := saveState(root, state); err != nil {
 		return err
 	}
@@ -591,6 +559,9 @@ func (a app) push(args []string) error {
 	if err != nil {
 		return err
 	}
+	if state.Backend == WorkspaceGit {
+		return a.gitPush(root, state, *newBranch)
+	}
 	mergeState, err := loadMergeState(root)
 	if err != nil {
 		return err
@@ -602,22 +573,28 @@ func (a app) push(args []string) error {
 		fmt.Fprintln(a.out, "Everything up to date. No local commits to push.")
 		return nil
 	}
-	c, err := clientForWorkspace(state)
+	remote, err := forgeForWorkspace(state)
 	if err != nil {
 		return err
 	}
-	remoteCommit, err := c.branchCommit(state.Owner, state.Repository, state.Branch)
+	if !remote.Capabilities().Push {
+		return fmt.Errorf("%s push is disabled because its concurrency safety has not been verified: %w", remote.Kind(), ErrUnsupported)
+	}
+	if *newBranch != "" && !remote.Capabilities().BranchCreate {
+		return fmt.Errorf("%s does not support creating branches through gew: %w", remote.Kind(), ErrUnsupported)
+	}
+	remoteCommit, err := remote.Head(context.Background(), state.Remote, state.Branch)
 	if err != nil {
-		if isAPINotFound(err) && state.BaseCommit == "" {
+		if isRemoteNotFound(err) && state.BaseCommit == "" {
 			remoteCommit = ""
 		} else {
 			return err
 		}
 	}
-	remoteFiles := make(map[string]string)
+	remoteFiles := make(map[string]RemoteFile)
 	pushed := 0
 	if remoteCommit != state.BaseCommit {
-		reconciled, reconciledFiles, reconcileErr := reconcileAppliedCommit(c, root, &state, state.Branch, remoteCommit)
+		reconciled, reconciledFiles, reconcileErr := reconcileAppliedCommit(remote, root, &state, state.Branch, remoteCommit)
 		if reconcileErr != nil {
 			return reconcileErr
 		}
@@ -628,7 +605,7 @@ func (a app) push(args []string) error {
 		pushed++
 		fmt.Fprintf(a.out, "Reconciled already-applied commit at %.12s after an ambiguous prior push.\n", remoteCommit)
 	} else if remoteCommit != "" {
-		remoteFiles, err = c.tree(state.Owner, state.Repository, remoteCommit)
+		remoteFiles, err = remote.Tree(context.Background(), state.Remote, remoteCommit)
 		if err != nil {
 			return err
 		}
@@ -648,30 +625,36 @@ func (a app) push(args []string) error {
 			return err
 		}
 		if len(operations) > 0 {
-			payload := changeFilesRequest{Branch: state.Branch, Message: commit.Message, Files: operations}
+			request := ApplyCommitRequest{
+				Repository: state.Remote, Branch: state.Branch, ExpectedHead: remoteCommit,
+				Message: commit.Message, Changes: operations,
+			}
 			if pushed == 0 && *newBranch != "" {
-				payload.NewBranch = targetBranch
+				request.NewBranch = targetBranch
 			}
-			if pushed > 0 || (*newBranch != "" && pushed == 0) {
-				if pushed > 0 {
-					payload.Branch = targetBranch
-				}
+			if pushed > 0 {
+				request.Branch = targetBranch
 			}
-			var response json.RawMessage
-			err = c.doJSON(http.MethodPost, repoAPIPath(state.Owner, state.Repository)+"/contents", payload, &response)
-			if err != nil {
-				var apiErr *apiError
-				if errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed) {
-					return fmt.Errorf("%w; this Gitea version may not support atomic multi-file changes", err)
+			result, applyErr := remote.ApplyCommit(context.Background(), request)
+			if applyErr != nil {
+				if errors.Is(applyErr, ErrStaleHead) {
+					return fmt.Errorf("remote branch advanced; run 'gew pull' before pushing: %w", applyErr)
 				}
+				return applyErr
+			}
+			if err := validateApplyResult(request, result); err != nil {
 				return err
 			}
+			remoteCommit = result.CommitID
 		}
-		newRemoteCommit, err := c.branchCommit(state.Owner, state.Repository, targetBranch)
+		newRemoteCommit, err := remote.Head(context.Background(), state.Remote, targetBranch)
 		if err != nil {
 			return fmt.Errorf("commit %.12s may have been submitted, but refreshing branch state failed: %w", commit.ID, err)
 		}
-		remoteFiles, err = c.tree(state.Owner, state.Repository, newRemoteCommit)
+		if remoteCommit != "" && newRemoteCommit != remoteCommit {
+			return fmt.Errorf("provider reported commit %.12s, but branch %s points to %.12s", remoteCommit, targetBranch, newRemoteCommit)
+		}
+		remoteFiles, err = remote.Tree(context.Background(), state.Remote, newRemoteCommit)
 		if err != nil {
 			return fmt.Errorf("commit %.12s was submitted, but refreshing file state failed: %w", commit.ID, err)
 		}
@@ -684,6 +667,7 @@ func (a app) push(args []string) error {
 		state.Queue = state.Queue[1:]
 		state.Branch = targetBranch
 		state.BaseCommit = newRemoteCommit
+		remoteCommit = newRemoteCommit
 		if err := saveState(root, state); err != nil {
 			return err
 		}
@@ -691,7 +675,7 @@ func (a app) push(args []string) error {
 		fmt.Fprintf(a.out, "Pushed %.12s -> %.12s  %s\n", commit.ID, newRemoteCommit, firstLine(commit.Message))
 	}
 	for filePath, metadata := range state.Files {
-		metadata.BlobSHA = remoteFiles[filePath]
+		metadata.BlobSHA = remoteFiles[filePath].BlobID
 		state.Files[filePath] = metadata
 	}
 	if err := saveState(root, state); err != nil {
@@ -701,16 +685,16 @@ func (a app) push(args []string) error {
 	return nil
 }
 
-func operationsFromCommit(root string, commit localCommit, remoteFiles map[string]string) ([]changeOperation, error) {
-	operations := make([]changeOperation, 0, len(commit.Changes))
+func operationsFromCommit(root string, commit localCommit, remoteFiles map[string]RemoteFile) ([]RemoteChange, error) {
+	operations := make([]RemoteChange, 0, len(commit.Changes))
 	for _, item := range commit.Changes {
-		remoteSHA, exists := remoteFiles[item.Path]
+		remoteFile, exists := remoteFiles[item.Path]
 		switch item.Kind {
 		case "deleted":
 			if !exists {
 				continue
 			}
-			operations = append(operations, changeOperation{Operation: "delete", Path: item.Path, SHA: remoteSHA})
+			operations = append(operations, RemoteChange{Operation: "delete", Path: item.Path, BlobID: remoteFile.BlobID, LastCommitID: remoteFile.LastCommitID, Mode: item.Mode})
 		case "created", "modified":
 			content, err := os.ReadFile(objectPath(root, item.Object))
 			if err != nil {
@@ -720,9 +704,9 @@ func operationsFromCommit(root string, commit localCommit, remoteFiles map[strin
 			if exists {
 				operation = "update"
 			}
-			operations = append(operations, changeOperation{
-				Operation: operation, Path: item.Path, SHA: remoteSHA,
-				Content: base64.StdEncoding.EncodeToString(content),
+			operations = append(operations, RemoteChange{
+				Operation: operation, Path: item.Path, BlobID: remoteFile.BlobID,
+				LastCommitID: remoteFile.LastCommitID, Content: content, Mode: item.Mode,
 			})
 		default:
 			return nil, fmt.Errorf("unsupported local commit change kind %q", item.Kind)
@@ -731,7 +715,7 @@ func operationsFromCommit(root string, commit localCommit, remoteFiles map[strin
 	return operations, nil
 }
 
-func reconcileAppliedCommit(c *client, root string, state *workspaceState, branch, remoteHead string) (bool, map[string]string, error) {
+func reconcileAppliedCommit(remote Forge, root string, state *workspaceState, branch, remoteHead string) (bool, map[string]RemoteFile, error) {
 	if len(state.Queue) == 0 {
 		return false, nil, nil
 	}
@@ -739,38 +723,38 @@ func reconcileAppliedCommit(c *client, root string, state *workspaceState, branc
 	if err != nil {
 		return false, nil, err
 	}
-	details, err := c.commit(state.Owner, state.Repository, remoteHead)
+	details, err := remote.CommitDetails(context.Background(), state.Remote, remoteHead)
 	if err != nil {
 		return false, nil, err
 	}
-	if strings.TrimSpace(details.Commit.Message) != strings.TrimSpace(commit.Message) {
+	if strings.TrimSpace(details.Message) != strings.TrimSpace(commit.Message) {
 		return false, nil, nil
 	}
 	if state.BaseCommit == "" {
-		if len(details.Parents) != 0 {
+		if len(details.ParentIDs) != 0 {
 			return false, nil, nil
 		}
-	} else if len(details.Parents) != 1 || details.Parents[0].SHA != state.BaseCommit {
+	} else if len(details.ParentIDs) != 1 || details.ParentIDs[0] != state.BaseCommit {
 		return false, nil, nil
 	}
 	expectedPaths := make(map[string]struct{}, len(commit.Changes))
 	for _, item := range commit.Changes {
 		expectedPaths[item.Path] = struct{}{}
 	}
-	if len(details.Files) != len(expectedPaths) {
+	if len(details.Paths) != len(expectedPaths) {
 		return false, nil, nil
 	}
-	for _, file := range details.Files {
-		if _, exists := expectedPaths[file.Filename]; !exists {
+	for _, filePath := range details.Paths {
+		if _, exists := expectedPaths[filePath]; !exists {
 			return false, nil, nil
 		}
 	}
-	remoteFiles, err := c.tree(state.Owner, state.Repository, remoteHead)
+	remoteFiles, err := remote.Tree(context.Background(), state.Remote, remoteHead)
 	if err != nil {
 		return false, nil, err
 	}
 	for _, item := range commit.Changes {
-		remoteBlob, exists := remoteFiles[item.Path]
+		remoteFile, exists := remoteFiles[item.Path]
 		if item.Kind == "deleted" {
 			if exists {
 				return false, nil, nil
@@ -780,7 +764,7 @@ func reconcileAppliedCommit(c *client, root string, state *workspaceState, branc
 		if !exists {
 			return false, nil, nil
 		}
-		remoteContent, err := c.blob(state.Owner, state.Repository, remoteBlob)
+		remoteContent, err := remote.Blob(context.Background(), state.Remote, remoteFile)
 		if err != nil {
 			return false, nil, err
 		}
@@ -803,7 +787,7 @@ func reconcileAppliedCommit(c *client, root string, state *workspaceState, branc
 	state.BaseCommit = remoteHead
 	if len(state.Queue) == 0 {
 		for filePath, metadata := range state.Files {
-			metadata.BlobSHA = remoteFiles[filePath]
+			metadata.BlobSHA = remoteFiles[filePath].BlobID
 			state.Files[filePath] = metadata
 		}
 	}
@@ -817,10 +801,10 @@ func normalizeServerURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid Gitea URL %q; include http:// or https://", raw)
+		return "", fmt.Errorf("invalid provider URL %q; include http:// or https://", raw)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", errors.New("Gitea URL must use http or https")
+		return "", errors.New("provider URL must use http or https")
 	}
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
@@ -861,6 +845,15 @@ func writeConfig(configPath string, cfg config) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return err
 	}
+	for name, saved := range cfg.Profiles {
+		if saved.Provider == "" {
+			saved.Provider = ForgeGitea
+		}
+		if saved.AuthKind == "" {
+			saved.AuthKind = defaultAuthKind(saved.Provider)
+		}
+		cfg.Profiles[name] = saved
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -879,7 +872,15 @@ func profileFromConfig() (profile, error) {
 		if err != nil {
 			return profile{}, err
 		}
-		return profile{URL: server, Token: tokenEnv}, nil
+		kind, err := normalizeForgeKind(os.Getenv("GEW_PROVIDER"))
+		if err != nil {
+			return profile{}, err
+		}
+		authKind := AuthKind(strings.TrimSpace(os.Getenv("GEW_AUTH_KIND")))
+		if authKind == "" {
+			authKind = defaultAuthKind(kind)
+		}
+		return profile{Provider: kind, URL: server, Token: tokenEnv, AuthKind: authKind, Username: strings.TrimSpace(os.Getenv("GEW_USERNAME"))}, nil
 	}
 	cfg, _, err := readConfig()
 	if err != nil {
@@ -891,180 +892,42 @@ func profileFromConfig() (profile, error) {
 	}
 	selected, ok := cfg.Profiles[name]
 	if !ok || selected.URL == "" || selected.Token == "" {
-		return profile{}, errors.New("not logged in; run 'gew login https://gitea.example.com'")
+		return profile{}, errors.New("not logged in; run 'gew login --provider PROVIDER URL'")
+	}
+	if selected.Provider == "" {
+		selected.Provider = ForgeGitea
+	}
+	if selected.AuthKind == "" {
+		selected.AuthKind = defaultAuthKind(selected.Provider)
 	}
 	return selected, nil
 }
 
-func clientFromConfig() (*client, error) {
+func forgeFromConfig() (Forge, profile, error) {
+	p, err := profileFromConfig()
+	if err != nil {
+		return nil, profile{}, err
+	}
+	remote, err := forgeFromProfile(p)
+	return remote, p, err
+}
+
+func forgeForWorkspace(state workspaceState) (Forge, error) {
+	state.syncLegacyIdentity()
 	p, err := profileFromConfig()
 	if err != nil {
 		return nil, err
 	}
-	return newClient(p), nil
-}
-
-func clientForWorkspace(state workspaceState) (*client, error) {
-	p, err := profileFromConfig()
-	if err != nil {
-		return nil, err
+	if p.Provider == "" {
+		p.Provider = ForgeGitea
 	}
-	if strings.TrimRight(p.URL, "/") != strings.TrimRight(state.Server, "/") {
-		return nil, fmt.Errorf("active profile points to %s, but this workspace belongs to %s", p.URL, state.Server)
+	if p.Provider != state.Provider {
+		return nil, fmt.Errorf("active profile uses %s, but this workspace belongs to %s", p.Provider, state.Provider)
 	}
-	return newClient(p), nil
-}
-
-func newClient(p profile) *client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if p.Insecure {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicitly requested by user profile
+	if strings.TrimRight(p.URL, "/") != strings.TrimRight(state.Remote.Server, "/") {
+		return nil, fmt.Errorf("active profile points to %s, but this workspace belongs to %s", p.URL, state.Remote.Server)
 	}
-	return &client{
-		baseURL: strings.TrimRight(p.URL, "/"), token: p.Token,
-		http: &http.Client{Transport: transport, Timeout: 90 * time.Second},
-	}
-}
-
-func (c *client) doJSON(method, apiPath string, requestBody any, responseBody any) error {
-	var body io.Reader
-	if requestBody != nil {
-		encoded, err := json.Marshal(requestBody)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(encoded)
-	}
-	req, err := http.NewRequest(method, c.baseURL+apiPath, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "token "+c.token)
-	req.Header.Set("User-Agent", "gew/"+toolVersion)
-	if requestBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &apiError{Status: resp.StatusCode, Method: method, URL: apiPath, Body: string(data)}
-	}
-	if responseBody != nil && len(bytes.TrimSpace(data)) > 0 {
-		if err := json.Unmarshal(data, responseBody); err != nil {
-			return fmt.Errorf("decode response from %s: %w", apiPath, err)
-		}
-	}
-	return nil
-}
-
-func (c *client) getJSON(apiPath string, responseBody any) error {
-	return c.doJSON(http.MethodGet, apiPath, nil, responseBody)
-}
-
-func (c *client) download(apiPath string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+apiPath, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "token "+c.token)
-	req.Header.Set("User-Agent", "gew/"+toolVersion)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, &apiError{Status: resp.StatusCode, Method: http.MethodGet, URL: apiPath, Body: string(data)}
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-func (c *client) branchCommit(owner, repo, branch string) (string, error) {
-	var response branchResponse
-	endpoint := repoAPIPath(owner, repo) + "/branches/" + url.PathEscape(branch)
-	if err := c.getJSON(endpoint, &response); err != nil {
-		return "", err
-	}
-	commit := response.commitSHA()
-	if commit == "" {
-		return "", fmt.Errorf("Gitea returned no commit SHA for branch %q", branch)
-	}
-	return commit, nil
-}
-
-func (c *client) tree(owner, repo, commit string) (map[string]string, error) {
-	result := make(map[string]string)
-	for pageNumber := 1; ; pageNumber++ {
-		endpoint := fmt.Sprintf("%s/git/trees/%s?recursive=true&page=%d&per_page=1000", repoAPIPath(owner, repo), url.PathEscape(commit), pageNumber)
-		var response treeResponse
-		if err := c.getJSON(endpoint, &response); err != nil {
-			return nil, err
-		}
-		for _, entry := range response.Tree {
-			if entry.Type == "blob" {
-				result[path.Clean(entry.Path)] = entry.SHA
-			}
-		}
-		if !response.Truncated || len(response.Tree) == 0 {
-			break
-		}
-	}
-	return result, nil
-}
-
-func (c *client) blob(owner, repo, sha string) ([]byte, error) {
-	var response blobResponse
-	endpoint := repoAPIPath(owner, repo) + "/git/blobs/" + url.PathEscape(sha)
-	if err := c.getJSON(endpoint, &response); err != nil {
-		return nil, err
-	}
-	if response.Encoding != "" && response.Encoding != "base64" {
-		return nil, fmt.Errorf("unsupported blob encoding %q", response.Encoding)
-	}
-	content := strings.ReplaceAll(response.Content, "\n", "")
-	decoded, err := base64.StdEncoding.DecodeString(content)
-	if err != nil {
-		return nil, fmt.Errorf("decode blob %s: %w", sha, err)
-	}
-	return decoded, nil
-}
-
-func (c *client) commit(owner, repo, sha string) (commitDetails, error) {
-	var response commitDetails
-	endpoint := repoAPIPath(owner, repo) + "/git/commits/" + url.PathEscape(sha) + "?stat=false&verification=false&files=true"
-	if err := c.getJSON(endpoint, &response); err != nil {
-		return commitDetails{}, err
-	}
-	return response, nil
-}
-
-func repoAPIPath(owner, repo string) string {
-	return "/api/v1/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
-}
-
-func archiveAPIPath(owner, repo, branch string) string {
-	return repoAPIPath(owner, repo) + "/archive/" + url.PathEscape(branch) + ".zip"
-}
-
-func parseRepository(value string) (string, string, error) {
-	parts := strings.Split(strings.Trim(value, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", errors.New("repository must be written as OWNER/REPO")
-	}
-	return parts[0], strings.TrimSuffix(parts[1], ".git"), nil
+	return forgeFromProfile(p)
 }
 
 func ensureEmptyDestination(destination string) error {
@@ -1235,8 +1098,47 @@ func mergeFileMetadata(local map[string]fileState, remote map[string]string) map
 	return merged
 }
 
+func remoteBlobIDs(files map[string]RemoteFile) map[string]string {
+	result := make(map[string]string, len(files))
+	for filePath, file := range files {
+		result[filePath] = file.BlobID
+	}
+	return result
+}
+
+func (state *workspaceState) syncLegacyIdentity() {
+	if state.Provider == "" {
+		state.Provider = ForgeGitea
+	}
+	if state.Remote.Forge == "" {
+		state.Remote = RepositoryRef{
+			Forge: state.Provider, Server: state.Server, Namespace: state.Owner,
+			Name: state.Repository,
+		}
+	}
+	if state.Remote.Server == "" {
+		state.Remote.Server = state.Server
+	}
+	if state.Remote.Forge == "" {
+		state.Remote.Forge = state.Provider
+	}
+	if state.Remote.Canonical == "" && state.Remote.Namespace != "" && state.Remote.Name != "" {
+		state.Remote.Canonical = state.Remote.Namespace + "/" + state.Remote.Name
+	}
+	state.Provider = state.Remote.Forge
+	state.Server = state.Remote.Server
+	state.Owner = state.Remote.Namespace
+	state.Repository = state.Remote.Name
+}
+
 func saveState(root string, state workspaceState) error {
 	state.Version = stateVersion
+	backend, err := normalizeWorkspaceBackend(state.Backend)
+	if err != nil {
+		return err
+	}
+	state.Backend = backend
+	state.syncLegacyIdentity()
 	directory := filepath.Join(root, ".gew")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
@@ -1282,14 +1184,22 @@ func findWorkspace() (string, workspaceState, error) {
 			if err := json.Unmarshal(data, &state); err != nil {
 				return "", workspaceState{}, fmt.Errorf("parse %s: %w", statePath, err)
 			}
-			if state.Version != 1 && state.Version != stateVersion {
+			if state.Version < 1 || state.Version > stateVersion {
 				return "", workspaceState{}, fmt.Errorf("unsupported workspace state version %d", state.Version)
 			}
-			if state.Version == 1 {
-				state.Version = stateVersion
+			backend, err := normalizeWorkspaceBackend(state.Backend)
+			if err != nil {
+				return "", workspaceState{}, err
 			}
+			state.Backend = backend
+			state.syncLegacyIdentity()
 			if state.Files == nil {
 				state.Files = make(map[string]fileState)
+			}
+			if state.Backend == WorkspaceGit {
+				if err := validateHybridState(current, &state); err != nil {
+					return "", workspaceState{}, err
+				}
 			}
 			return current, state, nil
 		}
