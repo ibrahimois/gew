@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
@@ -78,7 +79,7 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 	case request.Method == http.MethodGet && request.URL.Path == "/api/v1/version":
 		json.NewEncoder(response).Encode(map[string]string{"version": "1.27.0-test"})
 	case request.Method == http.MethodGet && request.URL.Path == "/api/v1/repos/acme/demo":
-		json.NewEncoder(response).Encode(repository{DefaultBranch: "main", Empty: f.commit == 0})
+		json.NewEncoder(response).Encode(giteaRepository{DefaultBranch: "main", Empty: f.commit == 0})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/branches/"):
 		branch := strings.TrimPrefix(request.URL.Path, "/api/v1/repos/acme/demo/branches/")
 		exists := branch == "main"
@@ -93,16 +94,16 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 			"name": branch, "commit": map[string]string{"id": f.commitSHA()},
 		})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/git/trees/"):
-		entries := make([]treeEntry, 0, len(f.files))
+		entries := make([]giteaTreeEntry, 0, len(f.files))
 		for name, content := range f.files {
-			entries = append(entries, treeEntry{Path: name, SHA: fakeBlobSHA(content), Type: "blob", Mode: "100644"})
+			entries = append(entries, giteaTreeEntry{Path: name, SHA: fakeBlobSHA(content), Type: "blob", Mode: "100644"})
 		}
-		json.NewEncoder(response).Encode(treeResponse{Tree: entries})
+		json.NewEncoder(response).Encode(giteaTreeResponse{Tree: entries})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/git/blobs/"):
 		sha := strings.TrimPrefix(request.URL.Path, "/api/v1/repos/acme/demo/git/blobs/")
 		for _, content := range f.files {
 			if fakeBlobSHA(content) == sha {
-				json.NewEncoder(response).Encode(blobResponse{Content: base64.StdEncoding.EncodeToString(content), Encoding: "base64", SHA: sha})
+				json.NewEncoder(response).Encode(giteaBlobResponse{Content: base64.StdEncoding.EncodeToString(content), Encoding: "base64", SHA: sha})
 				return
 			}
 		}
@@ -113,7 +114,7 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 			http.NotFound(response, request)
 			return
 		}
-		details := commitDetails{SHA: sha}
+		details := giteaCommitDetails{SHA: sha}
 		if len(f.messages) > 0 {
 			details.Commit.Message = f.messages[len(f.messages)-1]
 		}
@@ -149,7 +150,7 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 		writer.Close()
 		response.Write(archive.Bytes())
 	case request.Method == http.MethodPost && request.URL.Path == "/api/v1/repos/acme/demo/contents":
-		var payload changeFilesRequest
+		var payload giteaChangeFilesRequest
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			http.Error(response, err.Error(), http.StatusBadRequest)
 			return
@@ -720,18 +721,21 @@ func TestTreePagination(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		page := request.URL.Query().Get("page")
 		if page == "1" {
-			json.NewEncoder(response).Encode(treeResponse{Tree: []treeEntry{{Path: "one.txt", SHA: "one", Type: "blob"}}, Truncated: true})
+			json.NewEncoder(response).Encode(giteaTreeResponse{Tree: []giteaTreeEntry{{Path: "one.txt", SHA: "one", Type: "blob"}}, Truncated: true})
 			return
 		}
-		json.NewEncoder(response).Encode(treeResponse{Tree: []treeEntry{{Path: "two.txt", SHA: "two", Type: "blob"}}})
+		json.NewEncoder(response).Encode(giteaTreeResponse{Tree: []giteaTreeEntry{{Path: "two.txt", SHA: "two", Type: "blob"}}})
 	}))
 	defer server.Close()
-	c := newClient(profile{URL: server.URL, Token: "token"})
-	files, err := c.tree("acme", "demo", "commit")
+	forge, err := newGiteaForge(profile{Provider: ForgeGitea, URL: server.URL, Token: "token", AuthKind: AuthToken})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 || files["one.txt"] != "one" || files["two.txt"] != "two" {
+	files, err := forge.Tree(context.Background(), RepositoryRef{Forge: ForgeGitea, Namespace: "acme", Name: "demo"}, "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files["one.txt"].BlobID != "one" || files["two.txt"].BlobID != "two" {
 		t.Fatalf("paginated tree = %#v", files)
 	}
 }

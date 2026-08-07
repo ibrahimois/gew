@@ -1,8 +1,6 @@
 package main
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +20,11 @@ type bitbucketForge struct {
 	apiBase   string
 	requester *httpRequester
 }
+
+var (
+	_ Forge             = (*bitbucketForge)(nil)
+	_ ForgeCommitWriter = (*bitbucketForge)(nil)
+)
 
 type bitbucketRepository struct {
 	UUID      string `json:"uuid"`
@@ -90,9 +93,6 @@ func newBitbucketForge(p profile) (*bitbucketForge, error) {
 
 func newBitbucketForgeWithAPI(p profile, apiBase string) (*bitbucketForge, error) {
 	p.Provider = ForgeBitbucket
-	if p.AuthKind == "" {
-		p.AuthKind = AuthBearer
-	}
 	if p.AuthKind != AuthBearer && p.AuthKind != AuthBasic {
 		return nil, fmt.Errorf("bitbucket cloud supports bearer or basic authentication, got %q", p.AuthKind)
 	}
@@ -116,7 +116,7 @@ func newBitbucketForgeWithAPI(p profile, apiBase string) (*bitbucketForge, error
 func (b *bitbucketForge) Kind() ForgeKind { return ForgeBitbucket }
 
 func (b *bitbucketForge) Capabilities() ForgeCapabilities {
-	return ForgeCapabilities{ArchiveSnapshot: false, AtomicMultiFile: true, ConditionalRef: false, BranchCreate: true, Push: bitbucketPushVerified}
+	return ForgeCapabilities{BranchCreate: true, Push: bitbucketPushVerified}
 }
 
 func (b *bitbucketForge) Probe(ctx context.Context) error {
@@ -274,41 +274,6 @@ func (b *bitbucketForge) Blob(ctx context.Context, ref RepositoryRef, file Remot
 	return b.requester.download(ctx, endpoint)
 }
 
-func (b *bitbucketForge) Snapshot(ctx context.Context, ref RepositoryRef, revision string) ([]byte, error) {
-	files, err := b.Tree(ctx, ref, revision)
-	if err != nil {
-		return nil, err
-	}
-	var output bytes.Buffer
-	writer := zip.NewWriter(&output)
-	root := ref.Name + "-" + revision + "/"
-	for filePath, file := range files {
-		content, err := b.Blob(ctx, ref, file)
-		if err != nil {
-			writer.Close()
-			return nil, err
-		}
-		header := &zip.FileHeader{Name: root + filePath, Method: zip.Deflate}
-		header.SetMode(0o644)
-		if file.Mode&0o111 != 0 {
-			header.SetMode(0o755)
-		}
-		entry, err := writer.CreateHeader(header)
-		if err != nil {
-			writer.Close()
-			return nil, err
-		}
-		if _, err := entry.Write(content); err != nil {
-			writer.Close()
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return output.Bytes(), nil
-}
-
 func (b *bitbucketForge) CommitDetails(ctx context.Context, ref RepositoryRef, commit string) (RemoteCommit, error) {
 	var response bitbucketCommit
 	endpoint := bitbucketRepoAPIPath(ref) + "/commit/" + url.PathEscape(commit)
@@ -366,18 +331,6 @@ func (b *bitbucketForge) applyCommitUnchecked(ctx context.Context, request Apply
 	if current != request.ExpectedHead {
 		return ApplyCommitResult{}, ErrStaleHead
 	}
-	seen := make(map[string]bool)
-	for _, change := range request.Changes {
-		cleaned, err := validateRemotePath(change.Path)
-		if err != nil {
-			return ApplyCommitResult{}, err
-		}
-		if seen[cleaned] {
-			return ApplyCommitResult{}, fmt.Errorf("duplicate repository path %q", cleaned)
-		}
-		seen[cleaned] = true
-	}
-
 	pipeReader, pipeWriter := io.Pipe()
 	multipartWriter := multipart.NewWriter(pipeWriter)
 	writeErrors := make(chan error, 1)
@@ -401,15 +354,14 @@ func (b *bitbucketForge) applyCommitUnchecked(ctx context.Context, request Apply
 			}
 		}
 		for _, change := range request.Changes {
-			cleaned, _ := validateRemotePath(change.Path)
 			if change.Operation == "delete" {
-				if err := multipartWriter.WriteField("files", "/"+cleaned); err != nil {
+				if err := multipartWriter.WriteField("files", "/"+change.Path); err != nil {
 					writeErr = err
 					return
 				}
 				continue
 			}
-			part, err := multipartWriter.CreateFormFile("/"+cleaned, path.Base(cleaned))
+			part, err := multipartWriter.CreateFormFile("/"+change.Path, path.Base(change.Path))
 			if err != nil {
 				writeErr = err
 				return
@@ -442,7 +394,12 @@ func (b *bitbucketForge) applyCommitUnchecked(ctx context.Context, request Apply
 		return ApplyCommitResult{}, readErr
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return ApplyCommitResult{}, &RemoteError{Kind: ForgeBitbucket, Status: response.StatusCode, Method: http.MethodPost, URL: sanitizeEndpoint(requestHTTP.URL.String()), Body: b.requester.redact(string(data))}
+		remoteErr := &RemoteError{Kind: ForgeBitbucket, Status: response.StatusCode, Method: http.MethodPost, URL: sanitizeEndpoint(requestHTTP.URL.String()), Body: b.requester.redact(string(data))}
+		var err error = remoteErr
+		if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusConflict {
+			err = confirmStaleHead(ctx, b, request.Repository, request.Branch, request.ExpectedHead, remoteErr)
+		}
+		return ApplyCommitResult{}, err
 	}
 	var commit bitbucketCommit
 	if err := json.Unmarshal(data, &commit); err != nil {

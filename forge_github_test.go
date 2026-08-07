@@ -17,6 +17,14 @@ import (
 	"testing"
 )
 
+func TestGitHubForgeContract(t *testing.T) {
+	forge, err := newGitHubForge(profile{Provider: ForgeGitHub, URL: "https://github.com", Token: "token", AuthKind: AuthBearer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runForgeBaseContract(t, forge, ForgeGitHub, true, true, true)
+}
+
 func TestGitHubRepositoryParsing(t *testing.T) {
 	tests := []struct {
 		name, server, value, owner, repository string
@@ -161,6 +169,73 @@ func TestGitHubApplyCommitUsesGitDatabaseAndNonForceRefUpdate(t *testing.T) {
 	}
 	if !reflect.DeepEqual(requests, want) {
 		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+}
+
+func TestGitHubRefConflictRequiresConfirmedHeadChange(t *testing.T) {
+	for _, test := range []struct {
+		name, confirmed string
+		wantStale       bool
+	}{{name: "changed", confirmed: "advanced", wantStale: true}, {name: "unchanged policy failure", confirmed: "base"}} {
+		t.Run(test.name, func(t *testing.T) {
+			headReads := 0
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				switch {
+				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/git/ref/heads/main"):
+					headReads++
+					head := "base"
+					if headReads > 1 {
+						head = test.confirmed
+					}
+					json.NewEncoder(response).Encode(map[string]any{"object": map[string]string{"sha": head}})
+				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/git/commits/base"):
+					json.NewEncoder(response).Encode(map[string]any{"sha": "base", "tree": map[string]string{"sha": "tree-base"}})
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/git/blobs"):
+					json.NewEncoder(response).Encode(map[string]string{"sha": "blob"})
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/git/trees"):
+					json.NewEncoder(response).Encode(map[string]string{"sha": "tree"})
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/git/commits"):
+					json.NewEncoder(response).Encode(map[string]string{"sha": "created"})
+				case request.Method == http.MethodPatch:
+					http.Error(response, `{"message":"ref update rejected"}`, http.StatusUnprocessableEntity)
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			forge, _ := newGitHubForge(profile{Provider: ForgeGitHub, URL: server.URL, Token: "secret", AuthKind: AuthBearer})
+			_, err := forge.ApplyCommit(context.Background(), ApplyCommitRequest{Repository: RepositoryRef{Forge: ForgeGitHub, Namespace: "a", Name: "b"}, Branch: "main", ExpectedHead: "base", Message: "message", Changes: []RemoteChange{{Operation: "create", Path: "file", Content: []byte("data")}}})
+			if errors.Is(err, ErrStaleHead) != test.wantStale || !strings.Contains(err.Error(), "returned 422") {
+				t.Fatalf("error = %v, wantStale %v", err, test.wantStale)
+			}
+			if headReads != 2 {
+				t.Fatalf("head reads = %d, want 2", headReads)
+			}
+		})
+	}
+}
+
+func TestGitHubBlobValidationFailureIsNeverStale(t *testing.T) {
+	headReads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/git/ref/heads/main"):
+			headReads++
+			json.NewEncoder(response).Encode(map[string]any{"object": map[string]string{"sha": "base"}})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/git/commits/base"):
+			json.NewEncoder(response).Encode(map[string]any{"sha": "base", "tree": map[string]string{"sha": "tree-base"}})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/git/blobs"):
+			http.Error(response, `{"message":"invalid blob"}`, http.StatusUnprocessableEntity)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	forge, _ := newGitHubForge(profile{Provider: ForgeGitHub, URL: server.URL, Token: "secret", AuthKind: AuthBearer})
+	_, err := forge.ApplyCommit(context.Background(), ApplyCommitRequest{Repository: RepositoryRef{Forge: ForgeGitHub, Namespace: "a", Name: "b"}, Branch: "main", ExpectedHead: "base", Message: "message", Changes: []RemoteChange{{Operation: "create", Path: "file", Content: []byte("data")}}})
+	if err == nil || errors.Is(err, ErrStaleHead) || headReads != 1 {
+		t.Fatalf("blob error = %v, headReads=%d", err, headReads)
 	}
 }
 

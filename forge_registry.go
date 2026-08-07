@@ -8,18 +8,24 @@ import (
 
 type forgeFactory func(profile) (Forge, error)
 
-var forgeFactories = map[ForgeKind]forgeFactory{
-	ForgeGitea:     func(p profile) (Forge, error) { return newGiteaForge(p) },
-	ForgeGitHub:    func(p profile) (Forge, error) { return newGitHubForge(p) },
-	ForgeGitLab:    func(p profile) (Forge, error) { return newGitLabForge(p) },
-	ForgeBitbucket: func(p profile) (Forge, error) { return newBitbucketForge(p) },
-	ForgeAzure:     func(p profile) (Forge, error) { return newAzureForge(p) },
+type forgeDefinition struct {
+	Kind        ForgeKind
+	DefaultAuth AuthKind
+	Factory     forgeFactory
+}
+
+var forgeDefinitions = []forgeDefinition{
+	{Kind: ForgeAzure, DefaultAuth: AuthBearer, Factory: func(p profile) (Forge, error) { return newAzureForge(p) }},
+	{Kind: ForgeBitbucket, DefaultAuth: AuthBearer, Factory: func(p profile) (Forge, error) { return newBitbucketForge(p) }},
+	{Kind: ForgeGitea, DefaultAuth: AuthToken, Factory: func(p profile) (Forge, error) { return newGiteaForge(p) }},
+	{Kind: ForgeGitHub, DefaultAuth: AuthBearer, Factory: func(p profile) (Forge, error) { return newGitHubForge(p) }},
+	{Kind: ForgeGitLab, DefaultAuth: AuthBearer, Factory: func(p profile) (Forge, error) { return newGitLabForge(p) }},
 }
 
 func registeredForgeKinds() []ForgeKind {
-	kinds := make([]ForgeKind, 0, len(forgeFactories))
-	for kind := range forgeFactories {
-		kinds = append(kinds, kind)
+	kinds := make([]ForgeKind, 0, len(forgeDefinitions))
+	for _, definition := range forgeDefinitions {
+		kinds = append(kinds, definition.Kind)
 	}
 	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
 	return kinds
@@ -30,7 +36,7 @@ func normalizeForgeKind(value string) (ForgeKind, error) {
 	if kind == "" {
 		kind = ForgeGitea
 	}
-	if _, exists := forgeFactories[kind]; !exists {
+	if _, exists := lookupForgeDefinition(kind); !exists {
 		return "", fmt.Errorf("unknown provider %q (available: %s)", value, joinForgeKinds(registeredForgeKinds()))
 	}
 	return kind, nil
@@ -50,18 +56,26 @@ func forgeFromProfile(p profile) (Forge, error) {
 		return nil, err
 	}
 	p.Provider = kind
+	definition, _ := lookupForgeDefinition(kind)
 	if p.AuthKind == "" {
-		p.AuthKind = defaultAuthKind(kind)
+		p.AuthKind = definition.DefaultAuth
 	}
-	factory := forgeFactories[kind]
-	return factory(p)
+	return definition.Factory(p)
 }
 
 func defaultAuthKind(kind ForgeKind) AuthKind {
-	switch kind {
-	case ForgeGitHub, ForgeGitLab, ForgeBitbucket, ForgeAzure:
-		return AuthBearer
-	default:
-		return AuthToken
+	definition, exists := lookupForgeDefinition(kind)
+	if !exists {
+		return ""
 	}
+	return definition.DefaultAuth
+}
+
+func lookupForgeDefinition(kind ForgeKind) (forgeDefinition, bool) {
+	for _, definition := range forgeDefinitions {
+		if definition.Kind == kind {
+			return definition, true
+		}
+	}
+	return forgeDefinition{}, false
 }

@@ -13,6 +13,14 @@ import (
 	"testing"
 )
 
+func TestGitLabForgeContract(t *testing.T) {
+	forge, err := newGitLabForge(profile{Provider: ForgeGitLab, URL: "https://gitlab.com", Token: "token", AuthKind: AuthBearer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runForgeBaseContract(t, forge, ForgeGitLab, true, true, false)
+}
+
 func TestGitLabRepositoryParsing(t *testing.T) {
 	tests := []struct {
 		name, server, value, want string

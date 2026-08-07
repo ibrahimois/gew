@@ -8,8 +8,10 @@ GitHub commit `2f1a3fc6723ded372aa5f94cf863c6a66b08c866` and Gitea commit
 Execute Plan 001 first. Plans 002–005 may then proceed independently, although
 shipping one provider at a time is safer than developing all four concurrently.
 Execute Plan 006 only after Plans 001–005 are complete and the provider
-contract has stabilized. Every executor must read its plan fully, honor its
-STOP conditions, and update the status below.
+contract has stabilized. Plan 007 then hardens that contract using the five
+implemented adapters and both workspace backends as evidence. Every executor
+must read its plan fully, honor its STOP conditions, and update the status
+below.
 
 ## Direction findings
 
@@ -35,6 +37,7 @@ multi-week change including contract, fixture, and live-provider tests.
 | [004](004-bitbucket-cloud-adapter.md) | Add the Bitbucket Cloud REST adapter | P2 | L | 001 | DONE |
 | [005](005-azure-devops-adapter.md) | Add the Azure DevOps REST adapter | P2 | L | 001 | DONE |
 | [006](006-hybrid-git-workspace-migration.md) | Add an opt-in hybrid `.git` workspace and safe migration | P2 | L | 001–005 | DONE |
+| [007](007-harden-forge-adapter-contract.md) | Harden and modularize the forge adapter contract | P1 | L | 001–006 | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 `REJECTED (<reason>)`.
@@ -63,6 +66,11 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 - Plan 006 does not reverse the earlier rejection of Git transport. Its `.git`
   repository is local-only; all remote I/O continues through REST adapters, and
   `.gew` remains the synchronization journal.
+- Plan 007 follows Plans 001–006 because its conformance suite and interface
+  segregation rely on the final five-provider contract and both completed
+  workspace backends. Characterization tests and provider-local error
+  classification must land before the structural interface and registry
+  cleanup inside that plan.
 
 ## Findings considered and rejected
 
@@ -84,3 +92,10 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
   Mock tests validate encoding, but only sandbox repositories can establish
   stale-head, branch-protection, empty-repository, and ambiguous-response
   behavior for each forge.
+- **Use `init()` self-registration for adapters**: rejected. The project ships
+  one static binary, and an explicit descriptor catalog is easier to audit,
+  test for duplicates, and keep deterministic.
+- **Move every adapter into a separate package during Plan 007**: deferred.
+  First stabilize the smaller role interfaces and shared conformance suite;
+  package extraction can then be a mechanical follow-up instead of being mixed
+  with error-semantics and push-safety changes.

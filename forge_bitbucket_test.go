@@ -13,6 +13,14 @@ import (
 	"testing"
 )
 
+func TestBitbucketForgeContract(t *testing.T) {
+	forge, err := newBitbucketForge(profile{Provider: ForgeBitbucket, URL: "https://bitbucket.org", Token: "token", AuthKind: AuthBearer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runForgeBaseContract(t, forge, ForgeBitbucket, false, true, false)
+}
+
 func TestBitbucketRepositoryParsing(t *testing.T) {
 	tests := []struct {
 		value, workspace, repository string
@@ -120,7 +128,7 @@ func TestBitbucketSnapshotSynthesizesSafeZip(t *testing.T) {
 	}))
 	defer server.Close()
 	forge, _ := newBitbucketForgeWithAPI(profile{Provider: ForgeBitbucket, URL: server.URL, Token: "secret", AuthKind: AuthBearer}, server.URL)
-	data, err := forge.Snapshot(context.Background(), RepositoryRef{Forge: ForgeBitbucket, Namespace: "ws", Name: "repo"}, "commit")
+	data, err := forgeSnapshot(context.Background(), forge, RepositoryRef{Forge: ForgeBitbucket, Namespace: "ws", Name: "repo"}, "commit")
 	if err != nil {
 		t.Fatal(err)
 	}

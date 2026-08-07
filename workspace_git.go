@@ -568,7 +568,7 @@ func remoteByteSnapshot(ctx context.Context, remote Forge, ref RepositoryRef, co
 	if err != nil {
 		return nil, nil, err
 	}
-	archive, err := remote.Snapshot(ctx, ref, commit)
+	archive, err := forgeSnapshot(ctx, remote, ref, commit)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1044,7 +1044,7 @@ func verifyRemoteTree(ctx context.Context, remote Forge, ref RepositoryRef, comm
 	if len(files) != len(expected) {
 		return fmt.Errorf("provider commit %s tree has %d files, expected %d", commit, len(files), len(expected))
 	}
-	archive, err := remote.Snapshot(ctx, ref, commit)
+	archive, err := forgeSnapshot(ctx, remote, ref, commit)
 	if err != nil {
 		return err
 	}
@@ -1098,11 +1098,9 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 	if err != nil {
 		return err
 	}
-	if !remote.Capabilities().Push {
-		return fmt.Errorf("%s push is disabled because its concurrency safety has not been verified: %w", remote.Kind(), ErrUnsupported)
-	}
-	if newBranch != "" && !remote.Capabilities().BranchCreate {
-		return fmt.Errorf("%s does not support creating branches through gew: %w", remote.Kind(), ErrUnsupported)
+	writer, err := forgeWriter(remote, newBranch != "")
+	if err != nil {
+		return err
 	}
 	pending, err := pendingGitCommits(repository, state.Hybrid.TrackingRef)
 	if err != nil {
@@ -1127,7 +1125,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 	if prepared != nil && prepared.TargetBranch != state.Branch {
 		targetHead, targetErr := remote.Head(context.Background(), state.Remote, prepared.TargetBranch)
 		if targetErr == nil && targetHead != prepared.ExpectedProvider {
-			reconciled, reconcileErr := reconcilePreparedGitExport(context.Background(), root, &state, repository, remote, targetHead, prepared)
+			reconciled, reconcileErr := reconcilePreparedGitExport(context.Background(), root, &state, repository, remote, writer, targetHead, prepared)
 			if reconcileErr != nil {
 				return reconcileErr
 			}
@@ -1153,7 +1151,7 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		}
 	}
 	if prepared != nil && remoteHead != prepared.ExpectedProvider {
-		reconciled, reconcileErr := reconcilePreparedGitExport(context.Background(), root, &state, repository, remote, remoteHead, prepared)
+		reconciled, reconcileErr := reconcilePreparedGitExport(context.Background(), root, &state, repository, remote, writer, remoteHead, prepared)
 		if reconcileErr != nil {
 			return reconcileErr
 		}
@@ -1212,12 +1210,9 @@ func (a app) gitPushWithForge(root string, state workspaceState, newBranch strin
 		} else if index > 0 {
 			request.Branch = targetBranch
 		}
-		result, err := remote.ApplyCommit(context.Background(), request)
+		result, err := writer.ApplyCommit(context.Background(), request)
 		if err != nil {
 			return fmt.Errorf("export of local commit %.12s remains prepared for reconciliation: %w", commit.Hash, err)
-		}
-		if err := validateApplyResult(request, result); err != nil {
-			return err
 		}
 		confirmedHead, err := remote.Head(context.Background(), state.Remote, targetBranch)
 		if err != nil {
@@ -1296,12 +1291,12 @@ func finalizeGitNewBranch(repository *git.Repository, state *workspaceState, tar
 	return nil
 }
 
-func reconcilePreparedGitExport(ctx context.Context, root string, state *workspaceState, repository *git.Repository, remote Forge, remoteHead string, prepared *preparedGitExport) (bool, error) {
+func reconcilePreparedGitExport(ctx context.Context, root string, state *workspaceState, repository *git.Repository, remote Forge, inspector ForgeCommitInspector, remoteHead string, prepared *preparedGitExport) (bool, error) {
 	commit, err := repository.CommitObject(plumbing.NewHash(prepared.LocalOID))
 	if err != nil {
 		return false, err
 	}
-	details, err := remote.CommitDetails(ctx, state.Remote, remoteHead)
+	details, err := inspector.CommitDetails(ctx, state.Remote, remoteHead)
 	if err != nil {
 		return false, err
 	}

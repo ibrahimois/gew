@@ -15,6 +15,14 @@ import (
 	"testing"
 )
 
+func TestAzureForgeContract(t *testing.T) {
+	forge, err := newAzureForge(profile{Provider: ForgeAzure, URL: "https://dev.azure.com/example", Token: "token", AuthKind: AuthBearer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runForgeBaseContract(t, forge, ForgeAzure, false, true, true)
+}
+
 func TestAzureServerAndRepositoryParsing(t *testing.T) {
 	server, organization, err := normalizeAzureServer("https://example.visualstudio.com")
 	if err != nil || server != "https://dev.azure.com/example" || organization != "example" {
@@ -119,7 +127,7 @@ func TestAzureHeadTreeBlobAndSnapshotPinCommit(t *testing.T) {
 	if err != nil || !bytes.Equal(data, []byte{'a', 0, 'b'}) {
 		t.Fatalf("blob = %v, %v", data, err)
 	}
-	archive, err := forge.Snapshot(context.Background(), ref, head)
+	archive, err := forgeSnapshot(context.Background(), forge, ref, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,26 +259,40 @@ func TestAzureInitialAndNewBranchOldObjectIDs(t *testing.T) {
 }
 
 func TestAzureConflictAndValidationPreserveConditionalSafety(t *testing.T) {
+	currentHead := "advanced"
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/refs") {
+			json.NewEncoder(response).Encode(map[string]any{"value": []map[string]string{{"name": "refs/heads/main", "objectId": currentHead}}})
+			return
+		}
 		response.WriteHeader(http.StatusConflict)
 		io.WriteString(response, `{"message":"oldObjectId does not match"}`)
 	}))
 	defer server.Close()
 	forge, _ := newAzureForgeWithAPI(profile{Provider: ForgeAzure, URL: server.URL, Token: "secret", AuthKind: AuthBearer}, server.URL, "org")
+	writer, err := forgeWriter(forge, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := ApplyCommitRequest{
 		Repository: RepositoryRef{Forge: ForgeAzure, Project: "project-id", RemoteID: "repo-id"},
 		Branch:     "main", ExpectedHead: "stale", Message: "message", Changes: []RemoteChange{{Operation: "update", Path: "file.txt"}},
 	}
-	_, err := forge.ApplyCommit(context.Background(), request)
+	_, err = writer.ApplyCommit(context.Background(), request)
 	if !errors.Is(err, ErrStaleHead) {
 		t.Fatalf("conflict error = %v", err)
 	}
+	currentHead = "stale"
+	_, err = writer.ApplyCommit(context.Background(), request)
+	if err == nil || errors.Is(err, ErrStaleHead) || !strings.Contains(err.Error(), "returned 409") {
+		t.Fatalf("unchanged-head policy error = %v", err)
+	}
 	request.Changes = append(request.Changes, RemoteChange{Operation: "delete", Path: "file.txt"})
-	if _, err := forge.ApplyCommit(context.Background(), request); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	if _, err := writer.ApplyCommit(context.Background(), request); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate error = %v", err)
 	}
 	request.Changes = []RemoteChange{{Operation: "update", Path: "../escape"}}
-	if _, err := forge.ApplyCommit(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unsafe") {
+	if _, err := writer.ApplyCommit(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unsafe") {
 		t.Fatalf("path error = %v", err)
 	}
 }

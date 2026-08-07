@@ -293,13 +293,44 @@ implicit adoption of an existing Git repository are not supported.
 
 ## Provider adapter contract
 
-Remote adapters resolve a canonical repository identity and implement branch
-head, exact-revision snapshot, tree, blob, commit-detail, and atomic-commit
-operations. Each adapter advertises capabilities such as branch creation and
-conditional reference updates. The shared push engine supplies an expected
-head and verifies returned commit parents whenever a provider cannot guarantee
-an atomic compare-and-swap. Staging, diff, local commits, and three-way merge
-do not contain provider-specific behavior.
+Every remote adapter implements the small `Forge` base contract: identity,
+connection probing, canonical repository resolution, and exact-revision head,
+tree, and blob reads. Native archives and writes are separate structural roles.
+Adapters with a safe exact-revision archive implement `ForgeSnapshotter`;
+others use the shared deterministic Tree+Blob ZIP fallback. Adapters implement
+`ForgeCommitWriter` only when they can preserve one local commit as one atomic
+multi-file remote commit.
+
+`Push` and `BranchCreate` are explicit safety/product gates. Every enabled
+write goes through the shared validated writer, which normalizes and copies the
+request, rejects unsafe or duplicate paths before transmission, and validates
+the result. The engine supplies an expected head. A provider either updates the
+reference conditionally or returns parents proving that the new commit extends
+that exact head. Candidate provider conflicts become `ErrStaleHead` only after
+a fresh branch read confirms that the head changed; unrelated validation and
+branch-policy responses remain provider errors.
+
+To add a provider:
+
+1. Add its `ForgeKind` constant and implement the base `Forge` reader methods
+   with `httpRequester`.
+2. Implement `ForgeSnapshotter` only for a safe native archive pinned to an
+   exact revision; otherwise rely on the shared fallback.
+3. Implement `ForgeCommitWriter` only for atomic multi-file commits that honor
+   the expected-head/parent invariant. Keep `Push` false until disposable-repo
+   concurrency and ambiguous-response tests pass.
+4. Add one `forgeDefinition` catalog entry containing its default auth kind
+   and factory.
+5. Invoke the shared reader/snapshot/writer conformance helpers and retain
+   provider-specific HTTP payload, pagination, authentication, redaction, and
+   conflict fixtures.
+6. Run the full offline suite, then the provider's opt-in live tests against a
+   disposable repository.
+
+Staging, diff, local commits, and three-way merge contain no provider-specific
+behavior. GitLab and Bitbucket continue to implement gated raw writers for
+fixture coverage, but their `Push` capability remains false pending live safety
+verification.
 
 Workspace state version 3 stores the provider and provider-neutral repository
 identity, but never authentication credentials. State version 4 adds the local

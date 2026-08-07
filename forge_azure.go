@@ -1,15 +1,12 @@
 package main
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,6 +21,11 @@ type azureForge struct {
 	organization string
 	requester    *httpRequester
 }
+
+var (
+	_ Forge             = (*azureForge)(nil)
+	_ ForgeCommitWriter = (*azureForge)(nil)
+)
 
 type azureRepository struct {
 	ID            string `json:"id"`
@@ -71,9 +73,6 @@ func newAzureForge(p profile) (*azureForge, error) {
 
 func newAzureForgeWithAPI(p profile, apiBase, organization string) (*azureForge, error) {
 	p.Provider = ForgeAzure
-	if p.AuthKind == "" {
-		p.AuthKind = AuthBearer
-	}
 	if p.AuthKind != AuthBearer && p.AuthKind != AuthPAT {
 		return nil, fmt.Errorf("azure devops supports bearer or pat authentication, got %q", p.AuthKind)
 	}
@@ -93,7 +92,7 @@ func newAzureForgeWithAPI(p profile, apiBase, organization string) (*azureForge,
 func (a *azureForge) Kind() ForgeKind { return ForgeAzure }
 
 func (a *azureForge) Capabilities() ForgeCapabilities {
-	return ForgeCapabilities{ArchiveSnapshot: false, AtomicMultiFile: true, ConditionalRef: true, BranchCreate: true, Push: true}
+	return ForgeCapabilities{BranchCreate: true, Push: true}
 }
 
 func (a *azureForge) Probe(ctx context.Context) error {
@@ -195,43 +194,6 @@ func (a *azureForge) Blob(ctx context.Context, ref RepositoryRef, file RemoteFil
 	return a.requester.download(ctx, azureQuery(azureRepoAPIPath(ref)+"/items", query))
 }
 
-func (a *azureForge) Snapshot(ctx context.Context, ref RepositoryRef, revision string) ([]byte, error) {
-	files, err := a.Tree(ctx, ref, revision)
-	if err != nil {
-		return nil, err
-	}
-	paths := make([]string, 0, len(files))
-	for filePath := range files {
-		paths = append(paths, filePath)
-	}
-	sort.Strings(paths)
-	var output bytes.Buffer
-	writer := zip.NewWriter(&output)
-	root := ref.Name + "-" + revision + "/"
-	for _, filePath := range paths {
-		content, err := a.Blob(ctx, ref, files[filePath])
-		if err != nil {
-			_ = writer.Close()
-			return nil, err
-		}
-		header := &zip.FileHeader{Name: root + filePath, Method: zip.Deflate}
-		header.SetMode(0o644)
-		entry, err := writer.CreateHeader(header)
-		if err != nil {
-			_ = writer.Close()
-			return nil, err
-		}
-		if _, err := entry.Write(content); err != nil {
-			_ = writer.Close()
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return output.Bytes(), nil
-}
-
 func (a *azureForge) CommitDetails(ctx context.Context, ref RepositoryRef, commit string) (RemoteCommit, error) {
 	var response azureCommit
 	endpoint := azureRepoAPIPath(ref) + "/commits/" + url.PathEscape(commit)
@@ -267,9 +229,6 @@ func (a *azureForge) CommitDetails(ctx context.Context, ref RepositoryRef, commi
 }
 
 func (a *azureForge) ApplyCommit(ctx context.Context, request ApplyCommitRequest) (ApplyCommitResult, error) {
-	if strings.TrimSpace(request.Message) == "" {
-		return ApplyCommitResult{}, errors.New("azure commit message is empty")
-	}
 	if request.ExpectedHead == "" && request.NewBranch != "" {
 		return ApplyCommitResult{}, errors.New("azure new branch requires a base commit")
 	}
@@ -281,22 +240,13 @@ func (a *azureForge) ApplyCommit(ctx context.Context, request ApplyCommitRequest
 	if oldObjectID == "" {
 		oldObjectID = azureZeroOID
 	}
-	seen := make(map[string]bool)
 	changes := make([]map[string]any, 0, len(request.Changes))
 	for _, change := range request.Changes {
-		cleaned, err := validateRemotePath(change.Path)
-		if err != nil {
-			return ApplyCommitResult{}, err
-		}
-		if seen[cleaned] {
-			return ApplyCommitResult{}, fmt.Errorf("duplicate repository path %q", cleaned)
-		}
-		seen[cleaned] = true
 		changeType, err := azureChangeType(change.Operation)
 		if err != nil {
 			return ApplyCommitResult{}, err
 		}
-		encoded := map[string]any{"changeType": changeType, "item": map[string]string{"path": "/" + cleaned}}
+		encoded := map[string]any{"changeType": changeType, "item": map[string]string{"path": "/" + change.Path}}
 		if changeType != "delete" {
 			encoded["newContent"] = map[string]string{
 				"content": base64.StdEncoding.EncodeToString(change.Content), "contentType": "base64encoded",
@@ -311,6 +261,9 @@ func (a *azureForge) ApplyCommit(ctx context.Context, request ApplyCommitRequest
 	var response azurePushResponse
 	endpoint := azureQuery(azureRepoAPIPath(request.Repository)+"/pushes", nil)
 	if err := a.requester.doJSON(ctx, http.MethodPost, endpoint, payload, &response); err != nil {
+		if remoteErrorHasStatus(err, http.StatusBadRequest, http.StatusConflict) {
+			err = confirmStaleHead(ctx, a, request.Repository, request.Branch, request.ExpectedHead, err)
+		}
 		return ApplyCommitResult{}, err
 	}
 	if len(response.Commits) != 1 || len(response.RefUpdates) != 1 {
@@ -368,9 +321,9 @@ func parseAzureBlobID(value string) (string, string, error) {
 
 func azureChangeType(operation string) (string, error) {
 	switch operation {
-	case "create", "add":
+	case "create":
 		return "add", nil
-	case "update", "edit":
+	case "update":
 		return "edit", nil
 	case "delete":
 		return "delete", nil

@@ -20,6 +20,12 @@ type githubForge struct {
 	requester *httpRequester
 }
 
+var (
+	_ Forge             = (*githubForge)(nil)
+	_ ForgeSnapshotter  = (*githubForge)(nil)
+	_ ForgeCommitWriter = (*githubForge)(nil)
+)
+
 type githubRepository struct {
 	ID            int64   `json:"id"`
 	Name          string  `json:"name"`
@@ -88,9 +94,6 @@ func newGitHubForge(p profile) (*githubForge, error) {
 		return nil, err
 	}
 	p.Provider = ForgeGitHub
-	if p.AuthKind == "" {
-		p.AuthKind = AuthBearer
-	}
 	if p.AuthKind != AuthBearer {
 		return nil, fmt.Errorf("github requires bearer authentication, got %q", p.AuthKind)
 	}
@@ -123,7 +126,7 @@ func githubAPIBase(server string) (string, error) {
 func (g *githubForge) Kind() ForgeKind { return ForgeGitHub }
 
 func (g *githubForge) Capabilities() ForgeCapabilities {
-	return ForgeCapabilities{ArchiveSnapshot: true, AtomicMultiFile: true, ConditionalRef: true, BranchCreate: true, Push: true}
+	return ForgeCapabilities{BranchCreate: true, Push: true}
 }
 
 func (g *githubForge) Probe(ctx context.Context) error {
@@ -329,21 +332,12 @@ func (g *githubForge) ApplyCommit(ctx context.Context, request ApplyCommitReques
 		SHA  *string `json:"sha"`
 	}
 	items := make([]treeItem, 0, len(request.Changes))
-	seen := make(map[string]bool)
 	for _, change := range request.Changes {
-		cleaned, err := validateRemotePath(change.Path)
-		if err != nil {
-			return ApplyCommitResult{}, err
-		}
-		if seen[cleaned] {
-			return ApplyCommitResult{}, fmt.Errorf("duplicate repository path %q", cleaned)
-		}
-		seen[cleaned] = true
 		mode := "100644"
 		if change.Mode&0o111 != 0 {
 			mode = "100755"
 		}
-		item := treeItem{Path: cleaned, Mode: mode, Type: "blob"}
+		item := treeItem{Path: change.Path, Mode: mode, Type: "blob"}
 		switch change.Operation {
 		case "delete":
 			item.SHA = nil
@@ -404,6 +398,9 @@ func (g *githubForge) ApplyCommit(ctx context.Context, request ApplyCommitReques
 		var response githubRefResponse
 		endpoint := githubRepoAPIPath(request.Repository) + "/git/refs/" + url.PathEscape("heads/"+branch)
 		if err := g.requester.doJSON(ctx, http.MethodPatch, endpoint, payload, &response); err != nil {
+			if remoteErrorHasStatus(err, http.StatusConflict, http.StatusUnprocessableEntity) {
+				err = confirmStaleHead(ctx, g, request.Repository, request.Branch, request.ExpectedHead, err)
+			}
 			return ApplyCommitResult{}, err
 		}
 		if response.Object.SHA != created.SHA {

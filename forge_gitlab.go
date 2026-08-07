@@ -19,6 +19,12 @@ type gitLabForge struct {
 	requester *httpRequester
 }
 
+var (
+	_ Forge             = (*gitLabForge)(nil)
+	_ ForgeSnapshotter  = (*gitLabForge)(nil)
+	_ ForgeCommitWriter = (*gitLabForge)(nil)
+)
+
 type gitLabProject struct {
 	ID                int64  `json:"id"`
 	Name              string `json:"name"`
@@ -75,9 +81,6 @@ func newGitLabForge(p profile) (*gitLabForge, error) {
 		return nil, err
 	}
 	p.Provider = ForgeGitLab
-	if p.AuthKind == "" {
-		p.AuthKind = AuthBearer
-	}
 	if p.AuthKind != AuthBearer && p.AuthKind != AuthPrivate {
 		return nil, fmt.Errorf("gitlab supports bearer or private-token authentication, got %q", p.AuthKind)
 	}
@@ -98,7 +101,7 @@ func newGitLabForge(p profile) (*gitLabForge, error) {
 func (g *gitLabForge) Kind() ForgeKind { return ForgeGitLab }
 
 func (g *gitLabForge) Capabilities() ForgeCapabilities {
-	return ForgeCapabilities{ArchiveSnapshot: true, AtomicMultiFile: true, ConditionalRef: false, BranchCreate: true, Push: gitLabPushVerified}
+	return ForgeCapabilities{BranchCreate: true, Push: gitLabPushVerified}
 }
 
 func (g *gitLabForge) Probe(ctx context.Context) error {
@@ -251,28 +254,19 @@ func (g *gitLabForge) applyCommitUnchecked(ctx context.Context, request ApplyCom
 		LastCommitID string `json:"last_commit_id,omitempty"`
 	}
 	actions := make([]action, 0, len(request.Changes))
-	seen := make(map[string]bool)
 	for _, change := range request.Changes {
-		cleaned, err := validateRemotePath(change.Path)
-		if err != nil {
-			return ApplyCommitResult{}, err
-		}
-		if seen[cleaned] {
-			return ApplyCommitResult{}, fmt.Errorf("duplicate repository path %q", cleaned)
-		}
-		seen[cleaned] = true
-		item := action{Action: change.Operation, FilePath: cleaned}
+		item := action{Action: change.Operation, FilePath: change.Path}
 		switch change.Operation {
 		case "create":
 			item.Content = base64.StdEncoding.EncodeToString(change.Content)
 			item.Encoding = "base64"
 		case "update", "delete":
-			metadata, err := g.fileMetadata(ctx, request.Repository, cleaned, request.ExpectedHead)
+			metadata, err := g.fileMetadata(ctx, request.Repository, change.Path, request.ExpectedHead)
 			if err != nil {
 				return ApplyCommitResult{}, err
 			}
 			if metadata.LastCommitID == "" {
-				return ApplyCommitResult{}, fmt.Errorf("gitlab returned no last_commit_id for %s", cleaned)
+				return ApplyCommitResult{}, fmt.Errorf("gitlab returned no last_commit_id for %s", change.Path)
 			}
 			item.LastCommitID = metadata.LastCommitID
 			if change.Operation == "update" {
@@ -297,6 +291,9 @@ func (g *gitLabForge) applyCommitUnchecked(ctx context.Context, request ApplyCom
 	var response gitLabCommit
 	endpoint := gitLabProjectAPIPath(request.Repository) + "/repository/commits"
 	if err := g.requester.doJSON(ctx, http.MethodPost, endpoint, payload, &response); err != nil {
+		if remoteErrorHasStatus(err, http.StatusBadRequest, http.StatusConflict) {
+			err = confirmStaleHead(ctx, g, request.Repository, request.Branch, request.ExpectedHead, err)
+		}
 		return ApplyCommitResult{}, err
 	}
 	if response.ID == "" {

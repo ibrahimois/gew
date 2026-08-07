@@ -13,12 +13,12 @@ import (
 	"strings"
 )
 
-type repository struct {
+type giteaRepository struct {
 	DefaultBranch string `json:"default_branch"`
 	Empty         bool   `json:"empty"`
 }
 
-type branchResponse struct {
+type giteaBranchResponse struct {
 	Name   string `json:"name"`
 	Commit struct {
 		ID  string `json:"id"`
@@ -26,14 +26,14 @@ type branchResponse struct {
 	} `json:"commit"`
 }
 
-func (b branchResponse) commitSHA() string {
+func (b giteaBranchResponse) commitSHA() string {
 	if b.Commit.ID != "" {
 		return b.Commit.ID
 	}
 	return b.Commit.SHA
 }
 
-type treeEntry struct {
+type giteaTreeEntry struct {
 	Path string `json:"path"`
 	SHA  string `json:"sha"`
 	Type string `json:"type"`
@@ -41,20 +41,20 @@ type treeEntry struct {
 	Size int64  `json:"size"`
 }
 
-type treeResponse struct {
-	Tree       []treeEntry `json:"tree"`
-	Truncated  bool        `json:"truncated"`
-	Page       int         `json:"page"`
-	TotalCount int         `json:"total_count"`
+type giteaTreeResponse struct {
+	Tree       []giteaTreeEntry `json:"tree"`
+	Truncated  bool             `json:"truncated"`
+	Page       int              `json:"page"`
+	TotalCount int              `json:"total_count"`
 }
 
-type blobResponse struct {
+type giteaBlobResponse struct {
 	Content  string `json:"content"`
 	Encoding string `json:"encoding"`
 	SHA      string `json:"sha"`
 }
 
-type commitDetails struct {
+type giteaCommitDetails struct {
 	SHA    string `json:"sha"`
 	Commit struct {
 		Message string `json:"message"`
@@ -67,28 +67,30 @@ type commitDetails struct {
 	} `json:"files"`
 }
 
-type changeOperation struct {
+type giteaChangeOperation struct {
 	Operation string `json:"operation"`
 	Path      string `json:"path"`
 	Content   string `json:"content,omitempty"`
 	SHA       string `json:"sha,omitempty"`
 }
 
-type changeFilesRequest struct {
-	Branch    string            `json:"branch"`
-	NewBranch string            `json:"new_branch,omitempty"`
-	Message   string            `json:"message"`
-	Files     []changeOperation `json:"files"`
+type giteaChangeFilesRequest struct {
+	Branch    string                 `json:"branch"`
+	NewBranch string                 `json:"new_branch,omitempty"`
+	Message   string                 `json:"message"`
+	Files     []giteaChangeOperation `json:"files"`
 }
 
 type giteaForge struct {
 	baseURL   string
-	token     string
 	requester *httpRequester
 }
 
-type client = giteaForge
-type apiError = RemoteError
+var (
+	_ Forge             = (*giteaForge)(nil)
+	_ ForgeSnapshotter  = (*giteaForge)(nil)
+	_ ForgeCommitWriter = (*giteaForge)(nil)
+)
 
 func newGiteaForge(p profile) (*giteaForge, error) {
 	server, err := normalizeServerURL(p.URL)
@@ -96,9 +98,6 @@ func newGiteaForge(p profile) (*giteaForge, error) {
 		return nil, err
 	}
 	p.Provider = ForgeGitea
-	if p.AuthKind == "" {
-		p.AuthKind = AuthToken
-	}
 	if p.AuthKind != AuthToken && p.AuthKind != AuthBearer {
 		return nil, fmt.Errorf("gitea does not support authentication kind %q", p.AuthKind)
 	}
@@ -111,23 +110,14 @@ func newGiteaForge(p profile) (*giteaForge, error) {
 	}
 	return &giteaForge{
 		baseURL:   server,
-		token:     p.Token,
 		requester: newHTTPRequester(p, server, auth, make(http.Header)),
 	}, nil
-}
-
-func newClient(p profile) *client {
-	forge, err := newGiteaForge(p)
-	if err != nil {
-		panic(err)
-	}
-	return forge
 }
 
 func (g *giteaForge) Kind() ForgeKind { return ForgeGitea }
 
 func (g *giteaForge) Capabilities() ForgeCapabilities {
-	return ForgeCapabilities{ArchiveSnapshot: true, AtomicMultiFile: true, ConditionalRef: false, BranchCreate: true, Push: true}
+	return ForgeCapabilities{BranchCreate: true, Push: true}
 }
 
 func (g *giteaForge) Probe(ctx context.Context) error {
@@ -137,21 +127,13 @@ func (g *giteaForge) Probe(ctx context.Context) error {
 	return g.requester.doJSON(ctx, http.MethodGet, "/api/v1/version", nil, &version)
 }
 
-func (g *giteaForge) version(ctx context.Context) (string, error) {
-	var response struct {
-		Version string `json:"version"`
-	}
-	err := g.requester.doJSON(ctx, http.MethodGet, "/api/v1/version", nil, &response)
-	return response.Version, err
-}
-
 func (g *giteaForge) ResolveRepository(ctx context.Context, value string) (RepositoryRef, RepositoryInfo, error) {
 	owner, name, err := parseGiteaRepository(value)
 	if err != nil {
 		return RepositoryRef{}, RepositoryInfo{}, err
 	}
 	ref := RepositoryRef{Forge: ForgeGitea, Server: g.baseURL, Namespace: owner, Name: name, Canonical: owner + "/" + name}
-	var response repository
+	var response giteaRepository
 	if err := g.requester.doJSON(ctx, http.MethodGet, giteaRepoAPIPath(ref), nil, &response); err != nil {
 		return RepositoryRef{}, RepositoryInfo{}, err
 	}
@@ -159,7 +141,7 @@ func (g *giteaForge) ResolveRepository(ctx context.Context, value string) (Repos
 }
 
 func (g *giteaForge) Head(ctx context.Context, ref RepositoryRef, branch string) (string, error) {
-	var response branchResponse
+	var response giteaBranchResponse
 	endpoint := giteaRepoAPIPath(ref) + "/branches/" + url.PathEscape(branch)
 	if err := g.requester.doJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
 		return "", err
@@ -175,7 +157,7 @@ func (g *giteaForge) Tree(ctx context.Context, ref RepositoryRef, commit string)
 	result := make(map[string]RemoteFile)
 	for pageNumber := 1; ; pageNumber++ {
 		endpoint := fmt.Sprintf("%s/git/trees/%s?recursive=true&page=%d&per_page=1000", giteaRepoAPIPath(ref), url.PathEscape(commit), pageNumber)
-		var response treeResponse
+		var response giteaTreeResponse
 		if err := g.requester.doJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
 			return nil, err
 		}
@@ -204,7 +186,7 @@ func (g *giteaForge) Tree(ctx context.Context, ref RepositoryRef, commit string)
 }
 
 func (g *giteaForge) Blob(ctx context.Context, ref RepositoryRef, file RemoteFile) ([]byte, error) {
-	var response blobResponse
+	var response giteaBlobResponse
 	endpoint := giteaRepoAPIPath(ref) + "/git/blobs/" + url.PathEscape(file.BlobID)
 	if err := g.requester.doJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
 		return nil, err
@@ -225,7 +207,7 @@ func (g *giteaForge) Snapshot(ctx context.Context, ref RepositoryRef, revision s
 }
 
 func (g *giteaForge) CommitDetails(ctx context.Context, ref RepositoryRef, commit string) (RemoteCommit, error) {
-	var response commitDetails
+	var response giteaCommitDetails
 	endpoint := giteaRepoAPIPath(ref) + "/git/commits/" + url.PathEscape(commit) + "?stat=false&verification=false&files=true"
 	if err := g.requester.doJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
 		return RemoteCommit{}, err
@@ -247,24 +229,23 @@ func (g *giteaForge) ApplyCommit(ctx context.Context, request ApplyCommitRequest
 	if !g.Capabilities().Push {
 		return ApplyCommitResult{}, ErrUnsupported
 	}
-	operations := make([]changeOperation, 0, len(request.Changes))
+	operations := make([]giteaChangeOperation, 0, len(request.Changes))
 	for _, change := range request.Changes {
-		cleaned, err := validateRemotePath(change.Path)
-		if err != nil {
-			return ApplyCommitResult{}, err
-		}
-		operation := changeOperation{Operation: change.Operation, Path: cleaned, SHA: change.BlobID}
+		operation := giteaChangeOperation{Operation: change.Operation, Path: change.Path, SHA: change.BlobID}
 		if change.Operation != "delete" {
 			operation.Content = base64.StdEncoding.EncodeToString(change.Content)
 		}
 		operations = append(operations, operation)
 	}
-	payload := changeFilesRequest{Branch: request.Branch, NewBranch: request.NewBranch, Message: request.Message, Files: operations}
+	payload := giteaChangeFilesRequest{Branch: request.Branch, NewBranch: request.NewBranch, Message: request.Message, Files: operations}
 	var response json.RawMessage
 	if err := g.requester.doJSON(ctx, http.MethodPost, giteaRepoAPIPath(request.Repository)+"/contents", payload, &response); err != nil {
 		var remoteErr *RemoteError
 		if errors.As(err, &remoteErr) && (remoteErr.Status == http.StatusNotFound || remoteErr.Status == http.StatusMethodNotAllowed) {
 			return ApplyCommitResult{}, fmt.Errorf("%w; this gitea version may not support atomic multi-file changes", err)
+		}
+		if remoteErrorHasStatus(err, http.StatusConflict, http.StatusPreconditionFailed, http.StatusUnprocessableEntity) {
+			err = confirmStaleHead(ctx, g, request.Repository, request.Branch, request.ExpectedHead, err)
 		}
 		return ApplyCommitResult{}, err
 	}
@@ -298,56 +279,3 @@ func parseGiteaRepository(value string) (string, string, error) {
 	}
 	return parts[0], strings.TrimSuffix(parts[1], ".git"), nil
 }
-
-func isAPINotFound(err error) bool { return isRemoteNotFound(err) }
-
-// Compatibility helpers keep the original request-level tests useful while
-// command code is routed through Forge.
-func (g *giteaForge) doJSON(method, endpoint string, requestBody, responseBody any) error {
-	return g.requester.doJSON(context.Background(), method, endpoint, requestBody, responseBody)
-}
-
-func (g *giteaForge) getJSON(endpoint string, responseBody any) error {
-	return g.requester.doJSON(context.Background(), http.MethodGet, endpoint, nil, responseBody)
-}
-
-func (g *giteaForge) download(endpoint string) ([]byte, error) {
-	return g.requester.download(context.Background(), endpoint)
-}
-
-func (g *giteaForge) branchCommit(owner, name, branch string) (string, error) {
-	return g.Head(context.Background(), RepositoryRef{Forge: ForgeGitea, Server: g.baseURL, Namespace: owner, Name: name}, branch)
-}
-
-func (g *giteaForge) tree(owner, name, commit string) (map[string]string, error) {
-	files, err := g.Tree(context.Background(), RepositoryRef{Forge: ForgeGitea, Server: g.baseURL, Namespace: owner, Name: name}, commit)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]string, len(files))
-	for filePath, file := range files {
-		result[filePath] = file.BlobID
-	}
-	return result, nil
-}
-
-func (g *giteaForge) blob(owner, name, sha string) ([]byte, error) {
-	return g.Blob(context.Background(), RepositoryRef{Forge: ForgeGitea, Server: g.baseURL, Namespace: owner, Name: name}, RemoteFile{BlobID: sha})
-}
-
-func (g *giteaForge) commit(owner, name, sha string) (commitDetails, error) {
-	var response commitDetails
-	endpoint := giteaRepoAPIPath(RepositoryRef{Forge: ForgeGitea, Namespace: owner, Name: name}) + "/git/commits/" + url.PathEscape(sha) + "?stat=false&verification=false&files=true"
-	err := g.requester.doJSON(context.Background(), http.MethodGet, endpoint, nil, &response)
-	return response, err
-}
-
-func repoAPIPath(owner, name string) string {
-	return giteaRepoAPIPath(RepositoryRef{Forge: ForgeGitea, Namespace: owner, Name: name})
-}
-
-func archiveAPIPath(owner, name, branch string) string {
-	return giteaArchiveAPIPath(RepositoryRef{Forge: ForgeGitea, Namespace: owner, Name: name}, branch)
-}
-
-func parseRepository(value string) (string, string, error) { return parseGiteaRepository(value) }

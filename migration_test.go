@@ -1,8 +1,6 @@
 package main
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,12 +14,16 @@ import (
 )
 
 type migrationForge struct {
-	Forge
 	head    string
 	content map[string][]byte
 }
 
-func (f migrationForge) Kind() ForgeKind { return ForgeGitea }
+func (f migrationForge) Kind() ForgeKind                 { return ForgeGitea }
+func (f migrationForge) Capabilities() ForgeCapabilities { return ForgeCapabilities{} }
+func (f migrationForge) Probe(context.Context) error     { return nil }
+func (f migrationForge) ResolveRepository(context.Context, string) (RepositoryRef, RepositoryInfo, error) {
+	return RepositoryRef{Forge: ForgeGitea}, RepositoryInfo{}, nil
+}
 func (f migrationForge) Head(context.Context, RepositoryRef, string) (string, error) {
 	if f.head == "" {
 		return "", ErrNotFound
@@ -42,24 +44,6 @@ func (f migrationForge) Blob(_ context.Context, _ RepositoryRef, file RemoteFile
 	}
 	return append([]byte(nil), content...), nil
 }
-func (f migrationForge) Snapshot(context.Context, RepositoryRef, string) ([]byte, error) {
-	var output bytes.Buffer
-	writer := zip.NewWriter(&output)
-	for filePath, content := range f.content {
-		entry, err := writer.Create("snapshot/" + filePath)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := entry.Write(content); err != nil {
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return output.Bytes(), nil
-}
-
 func makeMigrationWorkspace(t *testing.T) (string, workspaceState, migrationForge) {
 	t.Helper()
 	root := t.TempDir()

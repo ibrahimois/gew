@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,7 +22,7 @@ import (
 )
 
 const (
-	toolVersion  = "0.4.0"
+	toolVersion  = "0.4.1"
 	stateVersion = 4
 )
 
@@ -307,7 +306,7 @@ func (a app) clone(args []string) error {
 	if err != nil {
 		return err
 	}
-	archive, err := remote.Snapshot(context.Background(), repositoryRef, commit)
+	archive, err := forgeSnapshot(context.Background(), remote, repositoryRef, commit)
 	if err != nil {
 		return err
 	}
@@ -507,7 +506,7 @@ func (a app) pull(args []string) error {
 		}
 		return a.mergeRemote(root, state, remote, commit, len(changes) != 0)
 	}
-	archive, err := remote.Snapshot(context.Background(), state.Remote, commit)
+	archive, err := forgeSnapshot(context.Background(), remote, state.Remote, commit)
 	if err != nil {
 		return err
 	}
@@ -577,11 +576,9 @@ func (a app) push(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !remote.Capabilities().Push {
-		return fmt.Errorf("%s push is disabled because its concurrency safety has not been verified: %w", remote.Kind(), ErrUnsupported)
-	}
-	if *newBranch != "" && !remote.Capabilities().BranchCreate {
-		return fmt.Errorf("%s does not support creating branches through gew: %w", remote.Kind(), ErrUnsupported)
+	writer, err := forgeWriter(remote, *newBranch != "")
+	if err != nil {
+		return err
 	}
 	remoteCommit, err := remote.Head(context.Background(), state.Remote, state.Branch)
 	if err != nil {
@@ -594,7 +591,7 @@ func (a app) push(args []string) error {
 	remoteFiles := make(map[string]RemoteFile)
 	pushed := 0
 	if remoteCommit != state.BaseCommit {
-		reconciled, reconciledFiles, reconcileErr := reconcileAppliedCommit(remote, root, &state, state.Branch, remoteCommit)
+		reconciled, reconciledFiles, reconcileErr := reconcileAppliedCommit(remote, writer, root, &state, state.Branch, remoteCommit)
 		if reconcileErr != nil {
 			return reconcileErr
 		}
@@ -635,15 +632,12 @@ func (a app) push(args []string) error {
 			if pushed > 0 {
 				request.Branch = targetBranch
 			}
-			result, applyErr := remote.ApplyCommit(context.Background(), request)
+			result, applyErr := writer.ApplyCommit(context.Background(), request)
 			if applyErr != nil {
 				if errors.Is(applyErr, ErrStaleHead) {
 					return fmt.Errorf("remote branch advanced; run 'gew pull' before pushing: %w", applyErr)
 				}
 				return applyErr
-			}
-			if err := validateApplyResult(request, result); err != nil {
-				return err
 			}
 			remoteCommit = result.CommitID
 		}
@@ -715,7 +709,7 @@ func operationsFromCommit(root string, commit localCommit, remoteFiles map[strin
 	return operations, nil
 }
 
-func reconcileAppliedCommit(remote Forge, root string, state *workspaceState, branch, remoteHead string) (bool, map[string]RemoteFile, error) {
+func reconcileAppliedCommit(remote Forge, inspector ForgeCommitInspector, root string, state *workspaceState, branch, remoteHead string) (bool, map[string]RemoteFile, error) {
 	if len(state.Queue) == 0 {
 		return false, nil, nil
 	}
@@ -723,7 +717,7 @@ func reconcileAppliedCommit(remote Forge, root string, state *workspaceState, br
 	if err != nil {
 		return false, nil, err
 	}
-	details, err := remote.CommitDetails(context.Background(), state.Remote, remoteHead)
+	details, err := inspector.CommitDetails(context.Background(), state.Remote, remoteHead)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1240,40 +1234,6 @@ func workspaceChanges(root string, state workspaceState) ([]change, error) {
 		return changes[i].Path < changes[j].Path
 	})
 	return changes, nil
-}
-
-func operationsForChanges(root string, state workspaceState, changes []change) ([]changeOperation, error) {
-	operations := make([]changeOperation, 0, len(changes))
-	for _, item := range changes {
-		operation := changeOperation{Path: item.Path}
-		switch item.Kind {
-		case "created":
-			operation.Operation = "create"
-		case "modified":
-			operation.Operation = "update"
-			operation.SHA = state.Files[item.Path].BlobSHA
-			if operation.SHA == "" {
-				return nil, fmt.Errorf("missing remote blob SHA for %s; pull a fresh snapshot", item.Path)
-			}
-		case "deleted":
-			operation.Operation = "delete"
-			operation.SHA = state.Files[item.Path].BlobSHA
-			if operation.SHA == "" {
-				return nil, fmt.Errorf("missing remote blob SHA for %s; pull a fresh snapshot", item.Path)
-			}
-		default:
-			return nil, fmt.Errorf("unsupported change type %q", item.Kind)
-		}
-		if item.Kind != "deleted" {
-			content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(item.Path)))
-			if err != nil {
-				return nil, err
-			}
-			operation.Content = base64.StdEncoding.EncodeToString(content)
-		}
-		operations = append(operations, operation)
-	}
-	return operations, nil
 }
 
 func replaceTrackedFiles(root, stage string, oldFiles map[string]fileState) error {

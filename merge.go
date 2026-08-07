@@ -159,7 +159,7 @@ func (a app) mergeRemote(root string, state workspaceState, remote Forge, remote
 	defer os.RemoveAll(resultDirectory)
 
 	if state.BaseCommit != "" {
-		baseArchive, err := remote.Snapshot(context.Background(), state.Remote, state.BaseCommit)
+		baseArchive, err := forgeSnapshot(context.Background(), remote, state.Remote, state.BaseCommit)
 		if err != nil {
 			return fmt.Errorf("download merge base %.12s: %w", state.BaseCommit, err)
 		}
@@ -167,7 +167,7 @@ func (a app) mergeRemote(root string, state workspaceState, remote Forge, remote
 			return err
 		}
 	}
-	theirsArchive, err := remote.Snapshot(context.Background(), state.Remote, remoteCommit)
+	theirsArchive, err := forgeSnapshot(context.Background(), remote, state.Remote, remoteCommit)
 	if err != nil {
 		return err
 	}

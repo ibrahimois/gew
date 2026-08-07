@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,7 +15,6 @@ import (
 )
 
 type gitExportForge struct {
-	Forge
 	head       string
 	files      map[string][]byte
 	applyCount int
@@ -27,7 +25,11 @@ type gitExportForge struct {
 
 func (f *gitExportForge) Kind() ForgeKind { return ForgeGitea }
 func (f *gitExportForge) Capabilities() ForgeCapabilities {
-	return ForgeCapabilities{Push: true, BranchCreate: true, AtomicMultiFile: true, ConditionalRef: true}
+	return ForgeCapabilities{Push: true, BranchCreate: true}
+}
+func (f *gitExportForge) Probe(context.Context) error { return nil }
+func (f *gitExportForge) ResolveRepository(context.Context, string) (RepositoryRef, RepositoryInfo, error) {
+	return RepositoryRef{Forge: ForgeGitea}, RepositoryInfo{}, nil
 }
 func (f *gitExportForge) Head(context.Context, RepositoryRef, string) (string, error) {
 	if f.head == "" {
@@ -44,23 +46,6 @@ func (f *gitExportForge) Tree(context.Context, RepositoryRef, string) (map[strin
 }
 func (f *gitExportForge) Blob(_ context.Context, _ RepositoryRef, file RemoteFile) ([]byte, error) {
 	return append([]byte(nil), f.files[file.BlobID]...), nil
-}
-func (f *gitExportForge) Snapshot(context.Context, RepositoryRef, string) ([]byte, error) {
-	var output bytes.Buffer
-	writer := zip.NewWriter(&output)
-	for filePath, content := range f.files {
-		entry, err := writer.Create("snapshot/" + filePath)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := entry.Write(content); err != nil {
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return output.Bytes(), nil
 }
 func (f *gitExportForge) ApplyCommit(_ context.Context, request ApplyCommitRequest) (ApplyCommitResult, error) {
 	if f.failApply != nil {

@@ -92,11 +92,8 @@ type ApplyCommitResult struct {
 }
 
 type ForgeCapabilities struct {
-	ArchiveSnapshot bool
-	AtomicMultiFile bool
-	ConditionalRef  bool
-	BranchCreate    bool
-	Push            bool
+	BranchCreate bool
+	Push         bool
 }
 
 type RemoteCommit struct {
@@ -106,16 +103,30 @@ type RemoteCommit struct {
 	Paths     []string
 }
 
+type RepositoryReader interface {
+	Head(context.Context, RepositoryRef, string) (string, error)
+	Tree(context.Context, RepositoryRef, string) (map[string]RemoteFile, error)
+	Blob(context.Context, RepositoryRef, RemoteFile) ([]byte, error)
+}
+
 type Forge interface {
+	RepositoryReader
 	Kind() ForgeKind
 	Capabilities() ForgeCapabilities
 	Probe(context.Context) error
 	ResolveRepository(context.Context, string) (RepositoryRef, RepositoryInfo, error)
-	Head(context.Context, RepositoryRef, string) (string, error)
-	Tree(context.Context, RepositoryRef, string) (map[string]RemoteFile, error)
-	Blob(context.Context, RepositoryRef, RemoteFile) ([]byte, error)
+}
+
+type ForgeSnapshotter interface {
 	Snapshot(context.Context, RepositoryRef, string) ([]byte, error)
+}
+
+type ForgeCommitInspector interface {
 	CommitDetails(context.Context, RepositoryRef, string) (RemoteCommit, error)
+}
+
+type ForgeCommitWriter interface {
+	ForgeCommitInspector
 	ApplyCommit(context.Context, ApplyCommitRequest) (ApplyCommitResult, error)
 }
 
@@ -145,10 +156,42 @@ func (e *RemoteError) Unwrap() error {
 	if e.Status == 404 {
 		return ErrNotFound
 	}
-	if e.Status == 409 || e.Status == 412 || e.Status == 422 {
-		return ErrStaleHead
-	}
 	return nil
+}
+
+func remoteErrorStatus(err error) (int, bool) {
+	var remoteErr *RemoteError
+	if !errors.As(err, &remoteErr) {
+		return 0, false
+	}
+	return remoteErr.Status, true
+}
+
+func remoteErrorHasStatus(err error, candidates ...int) bool {
+	status, ok := remoteErrorStatus(err)
+	if !ok {
+		return false
+	}
+	for _, candidate := range candidates {
+		if status == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmStaleHead classifies a provider mutation error as a concurrency
+// failure only when an exact branch read proves that the expected head moved.
+// The original sanitized provider error remains in the returned error chain.
+func confirmStaleHead(ctx context.Context, remote RepositoryReader, ref RepositoryRef, branch, expectedHead string, mutationErr error) error {
+	if mutationErr == nil || expectedHead == "" {
+		return mutationErr
+	}
+	observed, err := remote.Head(ctx, ref, branch)
+	if err != nil || observed == expectedHead {
+		return mutationErr
+	}
+	return errors.Join(mutationErr, ErrStaleHead)
 }
 
 func isRemoteNotFound(err error) bool {
@@ -187,4 +230,83 @@ func validateApplyResult(request ApplyCommitRequest, result ApplyCommitResult) e
 		return fmt.Errorf("remote commit %s was appended to unexpected parent; synchronize before pushing again", result.CommitID)
 	}
 	return nil
+}
+
+func validateApplyRequest(kind ForgeKind, request ApplyCommitRequest) (ApplyCommitRequest, error) {
+	request.Branch = strings.TrimSpace(request.Branch)
+	request.NewBranch = strings.TrimSpace(request.NewBranch)
+	request.Message = strings.TrimSpace(request.Message)
+	if request.Branch == "" {
+		return ApplyCommitRequest{}, errors.New("remote commit branch is empty")
+	}
+	if request.Message == "" {
+		return ApplyCommitRequest{}, errors.New("remote commit message is empty")
+	}
+	if len(request.Changes) == 0 {
+		return ApplyCommitRequest{}, errors.New("remote commit has no changes")
+	}
+	if request.Repository.Forge != "" && request.Repository.Forge != kind {
+		return ApplyCommitRequest{}, fmt.Errorf("repository provider %q does not match selected provider %q", request.Repository.Forge, kind)
+	}
+	request.Changes = append([]RemoteChange(nil), request.Changes...)
+	seen := make(map[string]struct{}, len(request.Changes))
+	for index := range request.Changes {
+		change := request.Changes[index]
+		switch change.Operation {
+		case "create", "update", "delete":
+		default:
+			return ApplyCommitRequest{}, fmt.Errorf("unsupported remote change operation %q", change.Operation)
+		}
+		cleaned, err := validateRemotePath(change.Path)
+		if err != nil {
+			return ApplyCommitRequest{}, err
+		}
+		if _, exists := seen[cleaned]; exists {
+			return ApplyCommitRequest{}, fmt.Errorf("duplicate repository path %q", cleaned)
+		}
+		seen[cleaned] = struct{}{}
+		change.Path = cleaned
+		change.Content = append([]byte(nil), change.Content...)
+		request.Changes[index] = change
+	}
+	return request, nil
+}
+
+type validatedForgeWriter struct {
+	kind ForgeKind
+	raw  ForgeCommitWriter
+}
+
+func (w validatedForgeWriter) CommitDetails(ctx context.Context, ref RepositoryRef, commit string) (RemoteCommit, error) {
+	return w.raw.CommitDetails(ctx, ref, commit)
+}
+
+func (w validatedForgeWriter) ApplyCommit(ctx context.Context, request ApplyCommitRequest) (ApplyCommitResult, error) {
+	validated, err := validateApplyRequest(w.kind, request)
+	if err != nil {
+		return ApplyCommitResult{}, err
+	}
+	result, err := w.raw.ApplyCommit(ctx, validated)
+	if err != nil {
+		return ApplyCommitResult{}, err
+	}
+	if err := validateApplyResult(validated, result); err != nil {
+		return ApplyCommitResult{}, err
+	}
+	return result, nil
+}
+
+func forgeWriter(remote Forge, newBranch bool) (ForgeCommitWriter, error) {
+	capabilities := remote.Capabilities()
+	if !capabilities.Push {
+		return nil, fmt.Errorf("%s push is disabled because its concurrency safety has not been verified: %w", remote.Kind(), ErrUnsupported)
+	}
+	if newBranch && !capabilities.BranchCreate {
+		return nil, fmt.Errorf("%s does not support creating branches through gew: %w", remote.Kind(), ErrUnsupported)
+	}
+	raw, ok := remote.(ForgeCommitWriter)
+	if !ok {
+		return nil, fmt.Errorf("%s advertises push without implementing the writer contract: %w", remote.Kind(), ErrUnsupported)
+	}
+	return validatedForgeWriter{kind: remote.Kind(), raw: raw}, nil
 }
