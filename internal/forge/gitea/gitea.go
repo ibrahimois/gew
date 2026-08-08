@@ -400,8 +400,13 @@ func (g *giteaForge) UploadReleaseAsset(ctx context.Context, ref forge.Repositor
 }
 
 func (g *giteaForge) DownloadReleaseAsset(ctx context.Context, ref forge.RepositoryRef, asset forge.RemoteReleaseAsset) (io.ReadCloser, error) {
-	endpoint := giteaRepoAPIPath(ref) + "/releases/assets/" + url.PathEscape(asset.ID)
-	return g.requester.DownloadReader(ctx, endpoint, "application/octet-stream")
+	endpoint, err := url.Parse(asset.URL)
+	server, serverErr := url.Parse(g.baseURL)
+	expectedPrefix := "/" + url.PathEscape(ref.Namespace) + "/" + url.PathEscape(ref.Name) + "/releases/download/"
+	if err != nil || serverErr != nil || !endpoint.IsAbs() || !forge.SameOrigin(server, endpoint) || !strings.HasPrefix(endpoint.EscapedPath(), expectedPrefix) || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return nil, errors.New("gitea returned an untrusted release asset download URL")
+	}
+	return g.requester.DownloadReader(ctx, endpoint.String(), "application/octet-stream")
 }
 
 func remoteGiteaRelease(release giteaRelease) forge.RemoteRelease {

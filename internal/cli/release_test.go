@@ -71,7 +71,7 @@ func TestReleaseCreateAndResumeEndToEnd(t *testing.T) {
 				json.NewEncoder(response).Encode([]any{})
 				return
 			}
-			json.NewEncoder(response).Encode([]map[string]any{{"id": 9, "name": "asset.bin", "size": len(uploaded)}})
+			json.NewEncoder(response).Encode([]map[string]any{{"id": 9, "name": "asset.bin", "size": len(uploaded), "browser_download_url": serverURL(request) + "/acme/demo/releases/download/v0.6.0/asset.bin"}})
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
 			file, _, err := request.FormFile("attachment")
 			if err != nil {
@@ -80,8 +80,8 @@ func TestReleaseCreateAndResumeEndToEnd(t *testing.T) {
 			uploaded, _ = io.ReadAll(file)
 			file.Close()
 			uploads++
-			json.NewEncoder(response).Encode(map[string]any{"id": 9, "name": "asset.bin", "size": len(uploaded)})
-		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/assets/9"):
+			json.NewEncoder(response).Encode(map[string]any{"id": 9, "name": "asset.bin", "size": len(uploaded), "browser_download_url": serverURL(request) + "/acme/demo/releases/download/v0.6.0/asset.bin"})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/download/v0.6.0/asset.bin"):
 			response.Write(uploaded)
 		default:
 			http.NotFound(response, request)

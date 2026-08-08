@@ -173,7 +173,7 @@ func TestGiteaReleasePublisher(t *testing.T) {
 			}
 			json.NewEncoder(response).Encode(giteaRelease{ID: 7, TagName: "v1.2.3", TargetCommitish: "exact", Name: "title", Body: "notes"})
 		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
-			json.NewEncoder(response).Encode([]giteaReleaseAsset{{ID: 9, Name: "gew.tar.gz", Size: 4}})
+			json.NewEncoder(response).Encode([]giteaReleaseAsset{{ID: 9, Name: "gew.tar.gz", Size: 4, BrowserURL: serverURL(request) + "/acme/demo/releases/download/v1.2.3/gew.tar.gz"}})
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
 			if request.URL.Query().Get("name") != "gew.tar.gz" {
 				t.Fatalf("asset query = %q", request.URL.RawQuery)
@@ -187,8 +187,8 @@ func TestGiteaReleasePublisher(t *testing.T) {
 			if header.Filename != "gew.tar.gz" {
 				t.Fatalf("filename = %q", header.Filename)
 			}
-			json.NewEncoder(response).Encode(giteaReleaseAsset{ID: 9, Name: "gew.tar.gz", Size: 4})
-		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/assets/9"):
+			json.NewEncoder(response).Encode(giteaReleaseAsset{ID: 9, Name: "gew.tar.gz", Size: 4, BrowserURL: serverURL(request) + "/acme/demo/releases/download/v1.2.3/gew.tar.gz"})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/download/v1.2.3/gew.tar.gz"):
 			response.Write([]byte("data"))
 		default:
 			http.NotFound(response, request)
@@ -223,3 +223,5 @@ func TestGiteaReleasePublisher(t *testing.T) {
 		t.Fatalf("download = %q", data)
 	}
 }
+
+func serverURL(request *http.Request) string { return "http://" + request.Host }

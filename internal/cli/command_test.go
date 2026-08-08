@@ -86,7 +86,7 @@ func TestCommandVersionAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunContext(%q) error = %v", args, err)
 		}
-		if output != "gew 0.6.0\n" {
+		if output != "gew 0.6.1\n" {
 			t.Errorf("RunContext(%q) output = %q", args, output)
 		}
 		if errorOutput != "" {

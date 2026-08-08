@@ -50,9 +50,9 @@ one remote commit at a time.
 To publish the synchronized commit as a GitHub or Gitea hosted release:
 
 ```sh
-gew release create v0.6.0 --title "gew v0.6.0" \
-  --notes-file release/v0.6.0/RELEASE_NOTES.md \
-  --asset /path/to/gew_0.6.0_linux_amd64.tar.gz \
+gew release create v0.6.1 --title "gew v0.6.1" \
+  --notes-file release/v0.6.1/RELEASE_NOTES.md \
+  --asset /path/to/gew_0.6.1_linux_amd64.tar.gz \
   --asset /path/to/SHA256SUMS
 ```
 
