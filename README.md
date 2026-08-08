@@ -1,4 +1,4 @@
-# git ew (`gew`)
+# gew
 
 <p align="center">
   <picture>
