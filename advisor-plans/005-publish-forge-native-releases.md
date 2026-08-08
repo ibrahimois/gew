@@ -21,7 +21,7 @@
 
 ## Status
 
-- **Status**: IN PROGRESS
+- **Status**: DONE
 - **Priority**: P1
 - **Effort**: L (multi-day, including live conformance)
 - **Risk**: HIGH — creates public tags/releases and uploads binary assets

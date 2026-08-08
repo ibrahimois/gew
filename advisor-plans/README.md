@@ -18,7 +18,7 @@ derived from the live GitHub/Gitea v0.5.0 publication on 2026-08-08.
 | [002](002-resilient-http-policy.md) | Add retry-safe HTTP policy and configurable timeouts | P1 | M | 001 | DONE |
 | [003](003-self-healing-push-and-large-gitea-commits.md) | Make ambiguous pushes self-healing and large Gitea commits recoverable | P1 | L | 002 | DONE |
 | [004](004-fallback-when-native-archives-fail.md) | Fall back to Tree+Blob when native archives fail | P1 | M | 002 | DONE |
-| [005](005-publish-forge-native-releases.md) | Publish tags and hosted releases through Gew | P1 | L | 002, 003 | IN PROGRESS |
+| [005](005-publish-forge-native-releases.md) | Publish tags and hosted releases through Gew | P1 | L | 002, 003 | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 `REJECTED (<reason>)`.
