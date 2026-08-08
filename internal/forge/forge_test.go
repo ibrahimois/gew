@@ -184,6 +184,31 @@ func TestForgeContractValidatedWriterResultInvariants(t *testing.T) {
 	}
 }
 
+func TestApplyCommitProofEvidenceValidationAndCopy(t *testing.T) {
+	request := ApplyCommitRequest{Repository: RepositoryRef{Forge: ForgeGitHub}, Branch: "main", ExpectedHead: "base", Message: "message", Changes: []RemoteChange{{Operation: "update", Path: "file.txt", Content: []byte("next")}}}
+	remote := &contractForge{kind: ForgeGitHub, capabilities: ForgeCapabilities{Push: true, PushProof: PushProofTree}, result: ApplyCommitResult{CommitID: "next", TargetHead: "next", ConditionalRef: true, ChangedFiles: map[string]RemoteFile{"file.txt": {BlobID: "blob"}}}}
+	writer, err := Writer(remote, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ApplyCommit(context.Background(), request); err == nil || !strings.Contains(err.Error(), "tree identity") {
+		t.Fatalf("missing tree proof accepted: %v", err)
+	}
+	remote.result.TreeID = "tree"
+	result, err := writer.ApplyCommit(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.result.ChangedFiles["file.txt"] = RemoteFile{BlobID: "mutated"}
+	if result.ChangedFiles["file.txt"].BlobID != "blob" {
+		t.Fatal("result evidence was not deep copied")
+	}
+	remote.result.TargetHead = "other"
+	if _, err := writer.ApplyCommit(context.Background(), request); err == nil {
+		t.Fatal("mismatched target head accepted")
+	}
+}
+
 func TestForgeContractWriterCapabilityGatesAndErrorIdentity(t *testing.T) {
 	disabled := &contractForge{kind: ForgeGitLab}
 	if _, err := Writer(disabled, false); !errors.Is(err, ErrUnsupported) || disabled.calls != 0 {

@@ -19,17 +19,11 @@ import (
 	"time"
 )
 
-const stateVersion = 4
+const stateVersion = 5
 
 type config struct {
 	Current  string             `json:"current"`
 	Profiles map[string]profile `json:"profiles"`
-}
-
-type fileState struct {
-	BlobSHA string `json:"blob_sha,omitempty"`
-	Hash    string `json:"hash"`
-	Mode    uint32 `json:"mode,omitempty"`
 }
 
 type workspaceState struct {
@@ -57,6 +51,7 @@ type change struct {
 type app struct {
 	out    io.Writer
 	errOut io.Writer
+	sync   *syncObserver
 }
 
 func (a app) loginOperation(ctx context.Context, options loginOptions) error {
@@ -137,7 +132,9 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 	if err != nil {
 		return err
 	}
+	finishPhase := a.sync.phase("resolve")
 	repositoryRef, repoInfo, err := remote.ResolveRepository(ctx, options.Repository)
+	finishPhase()
 	if err != nil {
 		return err
 	}
@@ -180,17 +177,24 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 		fmt.Fprintf(a.out, "Prepared empty %s workspace on %s in %s\n", repositoryRef.DisplayName(), branch, absDestination)
 		return nil
 	}
+	finishPhase = a.sync.phase("head")
 	commit, err := remote.Head(ctx, repositoryRef, branch)
+	finishPhase()
 	if err != nil {
 		return err
 	}
+	finishPhase = a.sync.phase("download")
 	snapshot, err := forgeSnapshot(ctx, remote, repositoryRef, commit)
+	finishPhase()
 	if err != nil {
 		return err
 	}
+	defer snapshot.Close()
 	remoteFiles := snapshot.Files
 	if remoteFiles == nil {
+		finishPhase = a.sync.phase("tree")
 		remoteFiles, err = remote.Tree(ctx, repositoryRef, commit)
+		finishPhase()
 		if err != nil {
 			return err
 		}
@@ -203,15 +207,17 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 		}
 		created = true
 	}
-	if err := extractArchive(snapshot.Archive, absDestination); err != nil {
+	finishPhase = a.sync.phase("extract")
+	localFiles, err := extractSnapshotWithObjects(snapshot.Artifact, absDestination, absDestination)
+	finishPhase()
+	if err != nil {
 		if created {
 			_ = os.Remove(absDestination)
 		}
 		return err
 	}
-	localFiles, err := scanWorkspace(absDestination)
-	if err != nil {
-		return err
+	if a.sync != nil {
+		a.sync.add(int64(len(localFiles)), snapshot.Artifact.Size())
 	}
 	state := workspaceState{
 		Version: stateVersion, Provider: remote.Kind(), Remote: repositoryRef,
@@ -224,12 +230,12 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 			return err
 		}
 	}
+	finishPhase = a.sync.phase("state")
 	if err := saveState(absDestination, state); err != nil {
+		finishPhase()
 		return err
 	}
-	if err := ensureBaselineObjects(absDestination, state.Files); err != nil {
-		return err
-	}
+	finishPhase()
 	if backend == WorkspaceGit && state.Hybrid.LastLocalOID != "" {
 		paths := make([]string, 0, len(state.Files))
 		for filePath := range state.Files {
@@ -249,6 +255,13 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 
 func (a app) statusOperation(_ context.Context, asJSON bool) error {
 	root, state, err := findWorkspace()
+	if err != nil {
+		return err
+	}
+	if err := recoverPull(root); err != nil {
+		return fmt.Errorf("recover interrupted pull: %w", err)
+	}
+	root, state, err = findWorkspace()
 	if err != nil {
 		return err
 	}
@@ -319,19 +332,19 @@ func (a app) pullOperation(ctx context.Context, ffOnly bool) error {
 	if err != nil {
 		return err
 	}
+	if err := recoverPull(root); err != nil {
+		return fmt.Errorf("recover interrupted pull: %w", err)
+	}
+	root, state, err = findWorkspace()
+	if err != nil {
+		return err
+	}
 	if state.Backend == WorkspaceGit {
 		remote, err := forgeForWorkspace(state)
 		if err != nil {
 			return err
 		}
 		return a.gitPull(ctx, root, state, remote, ffOnly)
-	}
-	index, err := loadIndex(root)
-	if err != nil {
-		return err
-	}
-	if len(index.Entries) != 0 {
-		return errors.New("workspace has staged changes; commit or reset them before pulling")
 	}
 	mergeState, err := loadMergeState(root)
 	if err != nil {
@@ -340,18 +353,13 @@ func (a app) pullOperation(ctx context.Context, ffOnly bool) error {
 	if mergeState != nil {
 		return errors.New("a merge is already in progress; continue or abort it first")
 	}
-	changes, err := workspaceChanges(root, state)
-	if err != nil {
-		return err
-	}
-	if len(state.Queue) != 0 && len(changes) != 0 {
-		return errors.New("workspace has both unpushed commits and additional unstaged changes; commit or restore the unstaged changes first")
-	}
 	remote, err := forgeForWorkspace(state)
 	if err != nil {
 		return err
 	}
+	finishPhase := a.sync.phase("head")
 	commit, err := remote.Head(ctx, state.Remote, state.Branch)
+	finishPhase()
 	if err != nil {
 		if isRemoteNotFound(err) && state.BaseCommit == "" {
 			fmt.Fprintln(a.out, "Already up to date (remote repository is empty).")
@@ -363,51 +371,29 @@ func (a app) pullOperation(ctx context.Context, ffOnly bool) error {
 		fmt.Fprintln(a.out, "Already up to date.")
 		return nil
 	}
+	index, err := loadIndex(root)
+	if err != nil {
+		return err
+	}
+	if len(index.Entries) != 0 {
+		return errors.New("workspace has staged changes; commit or reset them before pulling")
+	}
+	finishPhase = a.sync.phase("scan")
+	changes, err := workspaceChanges(root, state)
+	finishPhase()
+	if err != nil {
+		return err
+	}
+	if len(state.Queue) != 0 && len(changes) != 0 {
+		return errors.New("workspace has both unpushed commits and additional unstaged changes; commit or restore the unstaged changes first")
+	}
 	if len(changes) != 0 || len(state.Queue) != 0 {
 		if ffOnly {
 			return errors.New("fast-forward pull is not possible with local changes or unpushed commits")
 		}
 		return a.mergeRemote(ctx, root, state, remote, commit, len(changes) != 0)
 	}
-	snapshot, err := forgeSnapshot(ctx, remote, state.Remote, commit)
-	if err != nil {
-		return err
-	}
-	remoteFiles := snapshot.Files
-	if remoteFiles == nil {
-		remoteFiles, err = remote.Tree(ctx, state.Remote, commit)
-		if err != nil {
-			return err
-		}
-	}
-	stage, err := os.MkdirTemp("", "gew-pull-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(stage)
-	if err := extractArchive(snapshot.Archive, stage); err != nil {
-		return err
-	}
-	if _, err := scanWorkspace(stage); err != nil {
-		return fmt.Errorf("validate downloaded snapshot: %w", err)
-	}
-	if err := replaceTrackedFiles(root, stage, state.Files); err != nil {
-		return err
-	}
-	localFiles, err := scanWorkspace(root)
-	if err != nil {
-		return err
-	}
-	state.BaseCommit = commit
-	state.Files = mergeFileMetadata(localFiles, remoteBlobIDs(remoteFiles))
-	if err := saveState(root, state); err != nil {
-		return err
-	}
-	if err := ensureBaselineObjects(root, state.Files); err != nil {
-		return err
-	}
-	fmt.Fprintf(a.out, "Updated %s to %.12s.\n", state.Branch, commit)
-	return nil
+	return a.deltaPull(ctx, root, state, remote, commit)
 }
 
 func (a app) pushOperation(ctx context.Context, newBranch string) error {
@@ -459,7 +445,9 @@ func (a app) pushOperation(ctx context.Context, newBranch string) error {
 		pushed++
 		fmt.Fprintf(a.out, "Reconciled already-applied commit at %.12s after an ambiguous prior push.\n", remoteCommit)
 	} else if remoteCommit != "" {
+		finishPhase := a.sync.phase("tree")
 		remoteFiles, err = remote.Tree(ctx, state.Remote, remoteCommit)
+		finishPhase()
 		if err != nil {
 			return err
 		}
@@ -478,6 +466,7 @@ func (a app) pushOperation(ctx context.Context, newBranch string) error {
 		if err != nil {
 			return err
 		}
+		newRemoteCommit := remoteCommit
 		if len(operations) > 0 {
 			request := ApplyCommitRequest{
 				Repository: state.Remote, Branch: state.Branch, ExpectedHead: remoteCommit,
@@ -489,7 +478,9 @@ func (a app) pushOperation(ctx context.Context, newBranch string) error {
 			if pushed > 0 {
 				request.Branch = targetBranch
 			}
+			finishPhase := a.sync.phase("upload")
 			result, applyErr := writer.ApplyCommit(ctx, request)
+			finishPhase()
 			if applyErr != nil {
 				if errors.Is(applyErr, ErrStaleHead) {
 					return fmt.Errorf("remote branch advanced; run 'gew pull' before pushing: %w", applyErr)
@@ -513,18 +504,14 @@ func (a app) pushOperation(ctx context.Context, newBranch string) error {
 				}
 				return applyErr
 			}
-			remoteCommit = result.CommitID
-		}
-		newRemoteCommit, err := remote.Head(ctx, state.Remote, targetBranch)
-		if err != nil {
-			return fmt.Errorf("commit %.12s may have been submitted, but refreshing branch state failed: %w", commit.ID, err)
-		}
-		if remoteCommit != "" && newRemoteCommit != remoteCommit {
-			return fmt.Errorf("provider reported commit %.12s, but branch %s points to %.12s", remoteCommit, targetBranch, newRemoteCommit)
-		}
-		remoteFiles, err = remote.Tree(ctx, state.Remote, newRemoteCommit)
-		if err != nil {
-			return fmt.Errorf("commit %.12s was submitted, but refreshing file state failed: %w", commit.ID, err)
+			finishPhase = a.sync.phase("verify")
+			provenFiles, proofErr := proveAppliedCommit(ctx, remote, writer, request, result, remoteFiles)
+			finishPhase()
+			if proofErr != nil {
+				return fmt.Errorf("commit %.12s was submitted but proof failed: %w", commit.ID, proofErr)
+			}
+			remoteFiles = provenFiles
+			newRemoteCommit = result.CommitID
 		}
 		now := time.Now().UTC()
 		commit.RemoteSHA = newRemoteCommit
@@ -536,9 +523,12 @@ func (a app) pushOperation(ctx context.Context, newBranch string) error {
 		state.Branch = targetBranch
 		state.BaseCommit = newRemoteCommit
 		remoteCommit = newRemoteCommit
+		finishPhase := a.sync.phase("state")
 		if err := saveState(root, state); err != nil {
+			finishPhase()
 			return err
 		}
+		finishPhase()
 		pushed++
 		fmt.Fprintf(a.out, "Pushed %.12s -> %.12s  %s\n", commit.ID, newRemoteCommit, firstLine(commit.Message))
 	}
@@ -806,12 +796,39 @@ func ensureEmptyDestination(destination string) error {
 }
 
 func extractArchive(data []byte, destination string) error {
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	artifact, err := ArtifactFromBytes(data, SnapshotSourceNative)
 	if err != nil {
-		return fmt.Errorf("open repository archive: %w", err)
+		return err
+	}
+	defer artifact.Close()
+	_, err = extractSnapshot(artifact, destination)
+	return err
+}
+
+func extractSnapshot(artifact *SnapshotArtifact, destination string) (map[string]fileState, error) {
+	return extractSnapshotWithObjects(artifact, destination, "")
+}
+
+func extractSnapshotWithObjects(artifact *SnapshotArtifact, destination, objectRoot string) (map[string]fileState, error) {
+	if artifact == nil {
+		return nil, errors.New("repository snapshot is missing its artifact")
+	}
+	reader, err := zip.NewReader(artifact, artifact.Size())
+	if err != nil {
+		return nil, fmt.Errorf("open repository archive: %w", err)
+	}
+	metadata := make(map[string]fileState)
+	objectStage := ""
+	if objectRoot != "" {
+		objectStage, err = os.MkdirTemp("", "gew-object-stage-")
+		if err != nil {
+			return nil, err
+		}
+		defer os.RemoveAll(objectStage)
 	}
 	prefix := commonArchiveRoot(reader.File)
 	destinationClean := filepath.Clean(destination)
+	var total int64
 	for _, archived := range reader.File {
 		name := strings.TrimPrefix(strings.ReplaceAll(archived.Name, "\\", "/"), prefix)
 		name = strings.TrimPrefix(name, "/")
@@ -820,27 +837,27 @@ func extractArchive(data []byte, destination string) error {
 		}
 		cleanName := path.Clean(name)
 		if cleanName == "." || strings.HasPrefix(cleanName, "../") || path.IsAbs(cleanName) {
-			return fmt.Errorf("unsafe path %q in repository archive", archived.Name)
+			return nil, fmt.Errorf("unsafe path %q in repository archive", archived.Name)
 		}
 		if archived.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("repository contains symlink %q; symlinks are not supported by this MVP", cleanName)
+			return nil, fmt.Errorf("repository contains symlink %q; symlinks are not supported by this MVP", cleanName)
 		}
 		target := filepath.Join(destinationClean, filepath.FromSlash(cleanName))
 		if target != destinationClean && !strings.HasPrefix(target, destinationClean+string(os.PathSeparator)) {
-			return fmt.Errorf("unsafe path %q in repository archive", archived.Name)
+			return nil, fmt.Errorf("unsafe path %q in repository archive", archived.Name)
 		}
 		if archived.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
+			return nil, err
 		}
 		source, err := archived.Open()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		mode := archived.Mode().Perm()
 		if mode == 0 {
@@ -849,22 +866,64 @@ func extractArchive(data []byte, destination string) error {
 		targetFile, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 		if err != nil {
 			source.Close()
-			return err
+			return nil, err
 		}
-		_, copyErr := io.Copy(targetFile, source)
+		hasher := sha256.New()
+		writers := []io.Writer{targetFile, hasher}
+		var stagedObject *os.File
+		if objectStage != "" {
+			stagedObject, err = os.CreateTemp(objectStage, "object-")
+			if err != nil {
+				targetFile.Close()
+				source.Close()
+				return nil, err
+			}
+			writers = append(writers, stagedObject)
+		}
+		written, copyErr := io.Copy(io.MultiWriter(writers...), io.LimitReader(source, maxRemoteSnapshot-total+1))
 		closeErr := targetFile.Close()
 		sourceErr := source.Close()
+		if stagedObject != nil {
+			closeErr = errors.Join(closeErr, stagedObject.Close())
+		}
+		if written > maxRemoteSnapshot-total {
+			copyErr = fmt.Errorf("repository archive exceeds %d extracted bytes", maxRemoteSnapshot)
+		}
 		if copyErr != nil {
-			return copyErr
+			return nil, copyErr
 		}
 		if closeErr != nil {
-			return closeErr
+			return nil, closeErr
 		}
 		if sourceErr != nil {
-			return sourceErr
+			return nil, sourceErr
+		}
+		total += written
+		hash := hex.EncodeToString(hasher.Sum(nil))
+		if stagedObject != nil {
+			stagedHash := filepath.Join(objectStage, hash)
+			if _, err := os.Stat(stagedHash); err == nil {
+				_ = os.Remove(stagedObject.Name())
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			} else if err := os.Rename(stagedObject.Name(), stagedHash); err != nil {
+				return nil, err
+			}
+		}
+		metadata[cleanName] = fileState{Hash: hash, Mode: uint32(mode), Size: written}
+	}
+	if objectStage != "" {
+		entries, err := os.ReadDir(objectStage)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if err := publishObjectFile(objectRoot, filepath.Join(objectStage, entry.Name()), entry.Name()); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return nil
+	return metadata, nil
 }
 
 func commonArchiveRoot(files []*zip.File) string {
@@ -931,7 +990,7 @@ func scanWorkspace(root string) (map[string]fileState, error) {
 		if err != nil {
 			return err
 		}
-		files[relative] = fileState{Hash: hash, Mode: uint32(info.Mode().Perm())}
+		files[relative] = fileState{Hash: hash, Mode: uint32(info.Mode().Perm()), Size: info.Size()}
 		return nil
 	})
 	return files, err
@@ -1048,6 +1107,15 @@ func findWorkspace() (string, workspaceState, error) {
 			if state.Version < 1 || state.Version > stateVersion {
 				return "", workspaceState{}, fmt.Errorf("unsupported workspace state version %d", state.Version)
 			}
+			if _, journalErr := os.Stat(pullJournalPath(current)); journalErr == nil {
+				if err := recoverPull(current); err != nil {
+					return "", workspaceState{}, fmt.Errorf("recover interrupted pull: %w", err)
+				}
+				continue
+			} else if !errors.Is(journalErr, os.ErrNotExist) {
+				return "", workspaceState{}, journalErr
+			}
+			loadedVersion := state.Version
 			backend, err := normalizeWorkspaceBackend(state.Backend)
 			if err != nil {
 				return "", workspaceState{}, err
@@ -1056,6 +1124,12 @@ func findWorkspace() (string, workspaceState, error) {
 			state.syncLegacyIdentity()
 			if state.Files == nil {
 				state.Files = make(map[string]fileState)
+			}
+			if loadedVersion < 5 {
+				for filePath, metadata := range state.Files {
+					metadata.Size = -1
+					state.Files[filePath] = metadata
+				}
 			}
 			if state.Backend == WorkspaceGit {
 				if err := validateHybridState(current, &state); err != nil {

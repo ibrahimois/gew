@@ -371,7 +371,12 @@ func TestGitHubArchiveRedirectDoesNotLeakAuthorization(t *testing.T) {
 	}))
 	defer source.Close()
 	forge, _ := New(forgecore.Config{Provider: forgecore.ForgeGitHub, URL: source.URL, Token: "secret", AuthKind: forgecore.AuthBearer})
-	data, err := forge.Snapshot(context.Background(), forgecore.RepositoryRef{Forge: forgecore.ForgeGitHub, Namespace: "a", Name: "b"}, "commit")
+	artifact, err := forge.Snapshot(context.Background(), forgecore.RepositoryRef{Forge: forgecore.ForgeGitHub, Namespace: "a", Name: "b"}, "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifact.Close()
+	data, err := artifact.Bytes()
 	if err != nil {
 		t.Fatal(err)
 	}

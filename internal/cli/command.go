@@ -20,6 +20,7 @@ type loginOptions struct {
 type cloneOptions struct {
 	Repository, Directory, Branch string
 	Backend                       WorkspaceBackendKind
+	Sync                          syncOptions
 }
 
 type addOptions struct {
@@ -178,14 +179,21 @@ func cloneCommand(application app) *ucli.Command {
 		Flags: []ucli.Flag{
 			&ucli.StringFlag{Name: "branch", Usage: "branch to download", Destination: &options.Branch},
 			&ucli.StringFlag{Name: "backend", Value: string(WorkspaceGew), Usage: "local workspace backend (gew or git)", Destination: (*string)(&options.Backend)},
+			&ucli.StringFlag{Name: "progress", Value: "auto", Usage: "progress display (auto, always, or never)", Destination: &options.Sync.Progress},
+			&ucli.BoolFlag{Name: "timings", Usage: "print a sync timing summary to stderr", Destination: &options.Sync.Timings},
 		},
-		Action: func(ctx context.Context, command *ucli.Command) error {
+		Action: func(ctx context.Context, command *ucli.Command) (result error) {
 			if err := requireArity(command, 1, 2); err != nil {
 				return err
 			}
 			options.Repository = command.Args().Get(0)
 			options.Directory = command.Args().Get(1)
-			return application.cloneOperation(ctx, options)
+			configured, err := application.withSync(options.Sync)
+			if err != nil {
+				return err
+			}
+			defer finishSync(configured.sync, &result)
+			return configured.cloneOperation(configured.sync.context(ctx), options)
 		},
 	}
 }
@@ -275,10 +283,25 @@ func logCommand(application app) *ucli.Command {
 
 func pullCommand(application app) *ucli.Command {
 	var ffOnly bool
+	options := syncOptions{Progress: "auto"}
 	return &ucli.Command{
 		Name: "pull", Usage: "download and integrate remote changes",
-		Flags:  []ucli.Flag{&ucli.BoolFlag{Name: "ff-only", Usage: "refuse local merges", Destination: &ffOnly}},
-		Action: noArgsAction(func(ctx context.Context) error { return application.pullOperation(ctx, ffOnly) }),
+		Flags: []ucli.Flag{
+			&ucli.BoolFlag{Name: "ff-only", Usage: "refuse local merges", Destination: &ffOnly},
+			&ucli.StringFlag{Name: "progress", Value: "auto", Usage: "progress display (auto, always, or never)", Destination: &options.Progress},
+			&ucli.BoolFlag{Name: "timings", Usage: "print a sync timing summary to stderr", Destination: &options.Timings},
+		},
+		Action: func(ctx context.Context, command *ucli.Command) (result error) {
+			if err := requireArity(command, 0, 0); err != nil {
+				return err
+			}
+			configured, err := application.withSync(options)
+			if err != nil {
+				return err
+			}
+			defer finishSync(configured.sync, &result)
+			return configured.pullOperation(configured.sync.context(ctx), ffOnly)
+		},
 	}
 }
 
@@ -322,10 +345,25 @@ func migrateCommand(application app) *ucli.Command {
 
 func pushCommand(application app) *ucli.Command {
 	var newBranch string
+	options := syncOptions{Progress: "auto"}
 	return &ucli.Command{
 		Name: "push", Usage: "publish queued commits through the forge API",
-		Flags:  []ucli.Flag{&ucli.StringFlag{Name: "new-branch", Usage: "commit changes to a new branch", Destination: &newBranch}},
-		Action: noArgsAction(func(ctx context.Context) error { return application.pushOperation(ctx, newBranch) }),
+		Flags: []ucli.Flag{
+			&ucli.StringFlag{Name: "new-branch", Usage: "commit changes to a new branch", Destination: &newBranch},
+			&ucli.StringFlag{Name: "progress", Value: "auto", Usage: "progress display (auto, always, or never)", Destination: &options.Progress},
+			&ucli.BoolFlag{Name: "timings", Usage: "print a sync timing summary to stderr", Destination: &options.Timings},
+		},
+		Action: func(ctx context.Context, command *ucli.Command) (result error) {
+			if err := requireArity(command, 0, 0); err != nil {
+				return err
+			}
+			configured, err := application.withSync(options)
+			if err != nil {
+				return err
+			}
+			defer finishSync(configured.sync, &result)
+			return configured.pushOperation(configured.sync.context(ctx), newBranch)
+		},
 	}
 }
 

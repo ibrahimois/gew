@@ -2,7 +2,9 @@ package gitea
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,10 +104,11 @@ type giteaForge struct {
 }
 
 var (
-	_ forge.Forge                 = (*giteaForge)(nil)
-	_ forge.ForgeSnapshotter      = (*giteaForge)(nil)
-	_ forge.ForgeCommitWriter     = (*giteaForge)(nil)
-	_ forge.ForgeReleasePublisher = (*giteaForge)(nil)
+	_ forge.Forge                   = (*giteaForge)(nil)
+	_ forge.ForgeSnapshotter        = (*giteaForge)(nil)
+	_ forge.ForgeCommitWriter       = (*giteaForge)(nil)
+	_ forge.ForgeRevisionBlobReader = (*giteaForge)(nil)
+	_ forge.ForgeReleasePublisher   = (*giteaForge)(nil)
 )
 
 type giteaRelease struct {
@@ -157,7 +160,7 @@ func New(p forge.Config) (*giteaForge, error) {
 func (g *giteaForge) Kind() forge.ForgeKind { return forge.ForgeGitea }
 
 func (g *giteaForge) Capabilities() forge.ForgeCapabilities {
-	return forge.ForgeCapabilities{BranchCreate: true, Push: true}
+	return forge.ForgeCapabilities{BranchCreate: true, Push: true, NativeSnapshot: true, RecursiveTree: true, ReadConcurrency: 4, PushProof: forge.PushProofChangedBytes}
 }
 
 func (g *giteaForge) Probe(ctx context.Context) error {
@@ -231,19 +234,41 @@ func (g *giteaForge) Blob(ctx context.Context, ref forge.RepositoryRef, file for
 	if err := g.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
 		return nil, err
 	}
+	return decodeGiteaBlob(response, file.BlobID)
+}
+
+func (g *giteaForge) BlobAtRevision(ctx context.Context, ref forge.RepositoryRef, revision, filePath string) ([]byte, forge.RemoteFile, error) {
+	cleaned, err := forge.ValidateRemotePath(filePath)
+	if err != nil {
+		return nil, forge.RemoteFile{}, err
+	}
+	parts := strings.Split(cleaned, "/")
+	for index := range parts {
+		parts[index] = url.PathEscape(parts[index])
+	}
+	endpoint := giteaRepoAPIPath(ref) + "/contents/" + strings.Join(parts, "/") + "?ref=" + url.QueryEscape(revision)
+	var response giteaBlobResponse
+	if err := g.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return nil, forge.RemoteFile{}, err
+	}
+	content, err := decodeGiteaBlob(response, response.SHA)
+	return content, forge.RemoteFile{BlobID: response.SHA, Mode: 0o100644, Size: int64(len(content))}, err
+}
+
+func decodeGiteaBlob(response giteaBlobResponse, identity string) ([]byte, error) {
 	if response.Encoding != "" && response.Encoding != "base64" {
 		return nil, fmt.Errorf("unsupported blob encoding %q", response.Encoding)
 	}
 	content := strings.ReplaceAll(response.Content, "\n", "")
 	decoded, err := base64.StdEncoding.DecodeString(content)
 	if err != nil {
-		return nil, fmt.Errorf("decode blob %s: %w", file.BlobID, err)
+		return nil, fmt.Errorf("decode blob %s: %w", identity, err)
 	}
 	return decoded, nil
 }
 
-func (g *giteaForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) ([]byte, error) {
-	return g.requester.Download(ctx, giteaArchiveAPIPath(ref, revision))
+func (g *giteaForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) (*forge.SnapshotArtifact, error) {
+	return g.requester.DownloadArtifact(ctx, giteaArchiveAPIPath(ref, revision), forge.SnapshotSourceNative)
 }
 
 func (g *giteaForge) CommitDetails(ctx context.Context, ref forge.RepositoryRef, commit string) (forge.RemoteCommit, error) {
@@ -319,7 +344,23 @@ func (g *giteaForge) ApplyCommit(ctx context.Context, request forge.ApplyCommitR
 	for _, parent := range response.Commit.Parents {
 		parents = append(parents, parent.SHA)
 	}
-	return forge.ApplyCommitResult{CommitID: response.Commit.SHA, ParentIDs: parents, ConditionalRef: false}, nil
+	changed := make(map[string]forge.RemoteFile, len(request.Changes))
+	for _, change := range request.Changes {
+		metadata := forge.RemoteFile{Mode: change.Mode}
+		if change.Operation != "delete" {
+			metadata.BlobID = giteaGitBlobID(change.Content)
+			metadata.Size = int64(len(change.Content))
+		}
+		changed[change.Path] = metadata
+	}
+	return forge.ApplyCommitResult{CommitID: response.Commit.SHA, ParentIDs: parents, ConditionalRef: false, TargetHead: response.Commit.SHA, ChangedFiles: changed}, nil
+}
+
+func giteaGitBlobID(content []byte) string {
+	hasher := sha1.New() //nolint:gosec // Git object identity, not a security digest.
+	fmt.Fprintf(hasher, "blob %d%c", len(content), 0)
+	hasher.Write(content)
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func (g *giteaForge) FindReleaseByTag(ctx context.Context, ref forge.RepositoryRef, tag string) (forge.RemoteRelease, error) {

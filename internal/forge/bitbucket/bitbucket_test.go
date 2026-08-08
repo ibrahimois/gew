@@ -131,11 +131,12 @@ func TestBitbucketSnapshotSynthesizesSafeZip(t *testing.T) {
 	}))
 	defer server.Close()
 	forge, _ := newBitbucketForgeWithAPI(forgecore.Config{Provider: forgecore.ForgeBitbucket, URL: server.URL, Token: "secret", AuthKind: forgecore.AuthBearer}, server.URL)
-	data, err := forgecore.Snapshot(context.Background(), forge, forgecore.RepositoryRef{Forge: forgecore.ForgeBitbucket, Namespace: "ws", Name: "repo"}, "commit")
+	artifact, err := forgecore.Snapshot(context.Background(), forge, forgecore.RepositoryRef{Forge: forgecore.ForgeBitbucket, Namespace: "ws", Name: "repo"}, "commit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	defer artifact.Close()
+	reader, err := zip.NewReader(artifact, artifact.Size())
 	if err != nil || len(reader.File) != 1 || !strings.HasSuffix(reader.File[0].Name, "/file.txt") {
 		t.Fatalf("zip = %#v, %v", reader.File, err)
 	}

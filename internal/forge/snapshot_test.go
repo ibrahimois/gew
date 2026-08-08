@@ -24,9 +24,12 @@ type nativeSnapshotForge struct {
 	calls   int
 }
 
-func (f *nativeSnapshotForge) Snapshot(context.Context, RepositoryRef, string) ([]byte, error) {
+func (f *nativeSnapshotForge) Snapshot(context.Context, RepositoryRef, string) (*SnapshotArtifact, error) {
 	f.calls++
-	return append([]byte(nil), f.archive...), f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	return ArtifactFromBytes(f.archive, SnapshotSourceNative)
 }
 
 func (f *snapshotForge) Kind() ForgeKind                 { return ForgeKind("snapshot") }
@@ -65,10 +68,14 @@ func TestForgeSnapshotFallbackContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(first, second) {
+	defer first.Close()
+	defer second.Close()
+	firstBytes, _ := first.Bytes()
+	secondBytes, _ := second.Bytes()
+	if !bytes.Equal(firstBytes, secondBytes) {
 		t.Fatal("fallback snapshot is not deterministic")
 	}
-	reader, err := zip.NewReader(bytes.NewReader(first), int64(len(first)))
+	reader, err := zip.NewReader(first, first.Size())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +108,8 @@ func TestForgeSnapshotFallsBackAfterNativeFailure(t *testing.T) {
 	if remote.calls != 1 || remote.treeCalls != 1 || len(result.Files) != 1 {
 		t.Fatalf("native calls=%d tree calls=%d files=%d", remote.calls, remote.treeCalls, len(result.Files))
 	}
-	reader, err := zip.NewReader(bytes.NewReader(result.Archive), int64(len(result.Archive)))
+	defer result.Close()
+	reader, err := zip.NewReader(result.Artifact, result.Artifact.Size())
 	if err != nil {
 		t.Fatal(err)
 	}

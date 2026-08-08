@@ -50,9 +50,9 @@ one remote commit at a time.
 To publish the synchronized commit as a GitHub or Gitea hosted release:
 
 ```sh
-gew release create v0.6.1 --title "gew v0.6.1" \
-  --notes-file release/v0.6.1/RELEASE_NOTES.md \
-  --asset /path/to/gew_0.6.1_linux_amd64.tar.gz \
+gew release create v0.7.0 --title "gew v0.7.0" \
+  --notes-file release/v0.7.0/RELEASE_NOTES.md \
+  --asset /path/to/gew_0.7.0_linux_amd64.tar.gz \
   --asset /path/to/SHA256SUMS
 ```
 
@@ -134,6 +134,8 @@ gew reset                          # Unstage everything
 gew uncommit                       # Restore the newest unpushed commit to the index
 gew pull --ff-only                 # Refuse local merges
 gew push --new-branch feature/api  # Create and switch to a remote branch
+gew pull --progress always         # Show named sync phases on stderr
+gew push --timings                 # Print requests, bytes, files, and phase timings
 ```
 
 Commands work from workspace subdirectories. Paths are interpreted relative to
@@ -186,6 +188,10 @@ gew commit --help
 Flags may appear before or after positional arguments. Use `--` to terminate
 flag parsing when a path begins with `-`, for example `gew add -- -notes.md`.
 Print the release version with `gew version`, `gew --version`, or `gew -v`.
+
+Clone, pull, and push accept `--progress=auto|always|never` and `--timings`.
+Progress and summaries are written to stderr, so existing stdout and JSON
+consumers are unchanged. `auto` stays quiet when stderr is not a terminal.
 
 ### Shell completion
 
@@ -247,13 +253,25 @@ migration and implicit adoption of an existing Git repository are unsupported.
   commit. Partial queues checkpoint after each confirmed commit.
 - Accepted-but-lost responses are reconciled before retrying, preventing
   duplicate remote commits.
+- Enabled providers checkpoint pushes from validated REST mutation, tree, or
+  changed-byte proof. Complete repository snapshots are retained only as a
+  strict fallback, never as the healthy per-commit proof path.
 - Release creation and asset upload reconcile remote state before any replay;
   resume verifies exact metadata and downloaded asset SHA-256 values.
-- Pull refuses staged changes. Unstaged work is merged only when it can be
-  recovered or explicitly resolved.
-- Failed native archive downloads fall back to bounded Tree+Blob snapshots.
+- When remote HEAD is unchanged, pull returns after that one REST read without
+  scanning or rejecting local staged/unstaged work. When HEAD moved, the
+  existing staged/dirty/merge safety checks still run before any mutation.
+- Clean default-backend pulls compare the state-v5 manifest with one exact
+  remote Tree and fetch/apply only changed paths. The apply is journaled under
+  `.gew`, with old bytes retained until state is durable. Dirty merge pulls and
+  hybrid-backend pulls retain the exact-snapshot merge path.
+- Failed native archive downloads fall back to bounded concurrent Tree+Blob
+  snapshots (Azure 8, Bitbucket 4, generic 4 workers).
   Archive extraction rejects path traversal and symbolic links. Staging rejects
   paths outside the workspace and internal `.gew` or `.git` files.
+- Snapshot archives and fallback blobs spool through owned mode-`0600`
+  temporary artifacts. Heap use is bounded by archive metadata and copy
+  buffers; temporary disk use remains capped at 1 GiB per snapshot.
 - Tokens are never stored in a workspace.
 
 Empty repositories are cloneable. Gitea and Azure can create the first commit.
@@ -268,7 +286,7 @@ an empty GitHub repository elsewhere, then run `gew pull` before pushing.
 | GitHub | Native archive, then Git tree/blob fallback | Non-force conditional ref update; enabled for non-empty repos | Enabled |
 | GitLab | Native archive and paginated tree | Disabled pending live branch-wide concurrency proof | Unsupported |
 | Bitbucket Cloud | Exact-commit tree and shared ZIP fallback | Disabled pending live stale-parent/lost-response proof | Unsupported |
-| Azure DevOps | Exact-commit item listing and shared ZIP fallback | Exact `oldObjectId` ref update; enabled | Unsupported |
+| Azure DevOps | Native exact-commit Items ZIP, then concurrent Tree+Blob fallback | Exact `oldObjectId` ref update; enabled | Unsupported |
 
 ## Current limitations
 
@@ -278,6 +296,13 @@ an empty GitHub repository elsewhere, then run `gew pull` before pushing.
   detection. Renames appear as delete plus create.
 - Symlinks, submodules, executable-bit-only changes, and empty directories are
   not tracked.
+
+Performance regressions are characterized by request/work counts and the
+reproducible benchmarks below; CI does not use wall-clock thresholds:
+
+```sh
+go test -run '^$' -bench 'Sync|ScanWorkspace' -benchmem ./internal/cli
+```
 - `gew log` shows commits created by the current workspace, not full remote
   history.
 - Hybrid merges are exported as linear provider commits; hosted topology may

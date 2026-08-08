@@ -134,7 +134,11 @@ func (a app) mergeRemote(ctx context.Context, root string, state workspaceState,
 		if err != nil {
 			return fmt.Errorf("download merge base %.12s: %w", state.BaseCommit, err)
 		}
-		if err := extractArchive(baseSnapshot.Archive, baseDirectory); err != nil {
+		if _, err := extractSnapshot(baseSnapshot.Artifact, baseDirectory); err != nil {
+			_ = baseSnapshot.Close()
+			return err
+		}
+		if err := baseSnapshot.Close(); err != nil {
 			return err
 		}
 	}
@@ -142,7 +146,11 @@ func (a app) mergeRemote(ctx context.Context, root string, state workspaceState,
 	if err != nil {
 		return err
 	}
-	if err := extractArchive(theirsSnapshot.Archive, theirsDirectory); err != nil {
+	if _, err := extractSnapshot(theirsSnapshot.Artifact, theirsDirectory); err != nil {
+		_ = theirsSnapshot.Close()
+		return err
+	}
+	if err := theirsSnapshot.Close(); err != nil {
 		return err
 	}
 	remoteTree := theirsSnapshot.Files

@@ -10,6 +10,9 @@ import (
 // RunBaseContract verifies the roles and advertised capabilities of an adapter.
 func RunBaseContract(t testing.TB, remote forge.Forge, kind forge.ForgeKind, nativeSnapshot, writer, push bool) {
 	t.Helper()
+	if err := forge.ValidateCapabilities(remote); err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
 	if remote.Kind() != kind {
 		t.Fatalf("Kind() = %q, want %q", remote.Kind(), kind)
 	}

@@ -116,12 +116,29 @@ type ApplyCommitResult struct {
 	CommitID       string
 	ParentIDs      []string
 	ConditionalRef bool
+	TargetHead     string
+	TreeID         string
+	ChangedFiles   map[string]RemoteFile
 }
 
 type ForgeCapabilities struct {
-	BranchCreate bool
-	Push         bool
+	BranchCreate    bool
+	Push            bool
+	NativeSnapshot  bool
+	RecursiveTree   bool
+	CompareDelta    bool
+	TreeIdentity    bool
+	ReadConcurrency int
+	PushProof       PushProofStrategy
 }
+
+type PushProofStrategy string
+
+const (
+	PushProofStrict       PushProofStrategy = "strict-snapshot"
+	PushProofTree         PushProofStrategy = "tree"
+	PushProofChangedBytes PushProofStrategy = "changed-bytes"
+)
 
 type RemoteCommit struct {
 	ID        string
@@ -145,16 +162,40 @@ type Forge interface {
 }
 
 type ForgeSnapshotter interface {
-	Snapshot(context.Context, RepositoryRef, string) ([]byte, error)
+	Snapshot(context.Context, RepositoryRef, string) (*SnapshotArtifact, error)
 }
 
 type ForgeCommitInspector interface {
 	CommitDetails(context.Context, RepositoryRef, string) (RemoteCommit, error)
 }
 
+type ForgeRevisionBlobReader interface {
+	BlobAtRevision(context.Context, RepositoryRef, string, string) ([]byte, RemoteFile, error)
+}
+
 type ForgeCommitWriter interface {
 	ForgeCommitInspector
 	ApplyCommit(context.Context, ApplyCommitRequest) (ApplyCommitResult, error)
+}
+
+func ValidateCapabilities(remote Forge) error {
+	capabilities := remote.Capabilities()
+	if capabilities.ReadConcurrency < 0 || capabilities.ReadConcurrency > MaxReadConcurrency {
+		return fmt.Errorf("%s declares invalid read concurrency %d", remote.Kind(), capabilities.ReadConcurrency)
+	}
+	_, native := remote.(ForgeSnapshotter)
+	if capabilities.NativeSnapshot != native {
+		return fmt.Errorf("%s native snapshot capability does not match its implementation", remote.Kind())
+	}
+	if capabilities.Push && capabilities.PushProof == "" {
+		return fmt.Errorf("%s push capability does not declare a proof strategy", remote.Kind())
+	}
+	switch capabilities.PushProof {
+	case "", PushProofStrict, PushProofTree, PushProofChangedBytes:
+	default:
+		return fmt.Errorf("%s declares unknown push proof strategy %q", remote.Kind(), capabilities.PushProof)
+	}
+	return nil
 }
 
 var (
@@ -244,9 +285,36 @@ func ValidateRemotePath(value string) (string, error) {
 // the provider atomically refused an unexpected branch head. A provider without
 // that guarantee must return the created commit's parents so the engine can
 // distinguish a clean append from a concurrent append.
-func validateApplyResult(request ApplyCommitRequest, result ApplyCommitResult) error {
+func validateApplyResult(request ApplyCommitRequest, result ApplyCommitResult, proof PushProofStrategy) error {
 	if strings.TrimSpace(result.CommitID) == "" {
 		return errors.New("provider returned an empty commit ID")
+	}
+	if result.TargetHead != "" && result.TargetHead != result.CommitID {
+		return fmt.Errorf("provider reported target head %s for commit %s", result.TargetHead, result.CommitID)
+	}
+	if proof == PushProofTree && strings.TrimSpace(result.TreeID) == "" {
+		return errors.New("provider tree proof omitted the resulting tree identity")
+	}
+	if result.ChangedFiles != nil {
+		requested := make(map[string]RemoteChange, len(request.Changes))
+		for _, change := range request.Changes {
+			requested[change.Path] = change
+		}
+		if len(result.ChangedFiles) != len(requested) {
+			return errors.New("provider changed-file evidence does not match the submitted path set")
+		}
+		for filePath, metadata := range result.ChangedFiles {
+			change, exists := requested[filePath]
+			if !exists {
+				return fmt.Errorf("provider returned evidence for unsubmitted path %q", filePath)
+			}
+			if change.Operation != "delete" && strings.TrimSpace(metadata.BlobID) == "" {
+				return fmt.Errorf("provider returned empty blob evidence for %q", filePath)
+			}
+			if change.Operation == "delete" && metadata.BlobID != "" {
+				return fmt.Errorf("provider returned blob evidence for deleted path %q", filePath)
+			}
+		}
 	}
 	if result.ConditionalRef {
 		return nil
@@ -304,8 +372,9 @@ func validateApplyRequest(kind ForgeKind, request ApplyCommitRequest) (ApplyComm
 }
 
 type validatedForgeWriter struct {
-	kind ForgeKind
-	raw  ForgeCommitWriter
+	kind         ForgeKind
+	capabilities ForgeCapabilities
+	raw          ForgeCommitWriter
 }
 
 func (w validatedForgeWriter) CommitDetails(ctx context.Context, ref RepositoryRef, commit string) (RemoteCommit, error) {
@@ -321,8 +390,16 @@ func (w validatedForgeWriter) ApplyCommit(ctx context.Context, request ApplyComm
 	if err != nil {
 		return ApplyCommitResult{}, err
 	}
-	if err := validateApplyResult(validated, result); err != nil {
+	if err := validateApplyResult(validated, result, w.capabilities.PushProof); err != nil {
 		return ApplyCommitResult{}, err
+	}
+	result.ParentIDs = append([]string(nil), result.ParentIDs...)
+	if result.ChangedFiles != nil {
+		copied := make(map[string]RemoteFile, len(result.ChangedFiles))
+		for filePath, metadata := range result.ChangedFiles {
+			copied[filePath] = metadata
+		}
+		result.ChangedFiles = copied
 	}
 	return result, nil
 }
@@ -339,5 +416,8 @@ func Writer(remote Forge, newBranch bool) (ForgeCommitWriter, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s advertises push without implementing the writer contract: %w", remote.Kind(), ErrUnsupported)
 	}
-	return validatedForgeWriter{kind: remote.Kind(), raw: raw}, nil
+	if capabilities.PushProof == "" {
+		capabilities.PushProof = PushProofStrict
+	}
+	return validatedForgeWriter{kind: remote.Kind(), capabilities: capabilities, raw: raw}, nil
 }

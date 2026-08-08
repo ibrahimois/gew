@@ -47,6 +47,10 @@ type fakeGitea struct {
 	lastChanged     []string
 	resetAfterApply bool
 	snapshots       map[string]map[string][]byte
+	headCalls       int
+	treeCalls       int
+	blobCalls       int
+	snapshotCalls   int
 }
 
 func newFakeGitea() *fakeGitea {
@@ -98,6 +102,7 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 	case request.Method == http.MethodGet && request.URL.Path == "/api/v1/repos/acme/demo":
 		json.NewEncoder(response).Encode(giteaRepository{DefaultBranch: "main", Empty: f.commit == 0})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/branches/"):
+		f.headCalls++
 		branch := strings.TrimPrefix(request.URL.Path, "/api/v1/repos/acme/demo/branches/")
 		exists := branch == "main"
 		if f.branches != nil {
@@ -111,12 +116,14 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 			"name": branch, "commit": map[string]string{"id": f.commitSHA()},
 		})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/git/trees/"):
+		f.treeCalls++
 		entries := make([]giteaTreeEntry, 0, len(f.files))
 		for name, content := range f.files {
 			entries = append(entries, giteaTreeEntry{Path: name, SHA: fakeBlobSHA(content), Type: "blob", Mode: "100644"})
 		}
 		json.NewEncoder(response).Encode(giteaTreeResponse{Tree: entries})
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/git/blobs/"):
+		f.blobCalls++
 		sha := strings.TrimPrefix(request.URL.Path, "/api/v1/repos/acme/demo/git/blobs/")
 		for _, content := range f.files {
 			if fakeBlobSHA(content) == sha {
@@ -147,6 +154,7 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 		}
 		json.NewEncoder(response).Encode(details)
 	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/repos/acme/demo/archive/"):
+		f.snapshotCalls++
 		response.Header().Set("Content-Type", "application/zip")
 		ref := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/api/v1/repos/acme/demo/archive/"), ".zip")
 		archiveFiles := f.files
@@ -537,6 +545,11 @@ func TestPullRefusesStagedAndMergesUnstagedChanges(t *testing.T) {
 	if err := a.add([]string{"README.md"}); err != nil {
 		t.Fatal(err)
 	}
+	fake.mu.Lock()
+	fake.files["first-remote.txt"] = []byte("remote first\n")
+	fake.commit++
+	fake.recordSnapshotLocked()
+	fake.mu.Unlock()
 	if err := a.pull(nil); err == nil || !strings.Contains(err.Error(), "staged changes") {
 		t.Fatalf("expected staged pull refusal, got %v", err)
 	}

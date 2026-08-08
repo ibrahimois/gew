@@ -27,15 +27,18 @@ type RemoteRelease = forge.RemoteRelease
 type RemoteReleaseAsset = forge.RemoteReleaseAsset
 type CreateReleaseRequest = forge.CreateReleaseRequest
 type ForgeSnapshotResult = forge.SnapshotResult
+type SnapshotArtifact = forge.SnapshotArtifact
+type SnapshotSource = forge.SnapshotSource
 
 const (
-	ForgeGitea        = forge.ForgeGitea
-	ForgeGitHub       = forge.ForgeGitHub
-	ForgeGitLab       = forge.ForgeGitLab
-	ForgeBitbucket    = forge.ForgeBitbucket
-	ForgeAzure        = forge.ForgeAzure
-	AuthToken         = forge.AuthToken
-	maxRemoteSnapshot = forge.MaxRemoteSnapshot
+	ForgeGitea           = forge.ForgeGitea
+	ForgeGitHub          = forge.ForgeGitHub
+	ForgeGitLab          = forge.ForgeGitLab
+	ForgeBitbucket       = forge.ForgeBitbucket
+	ForgeAzure           = forge.ForgeAzure
+	AuthToken            = forge.AuthToken
+	maxRemoteSnapshot    = forge.MaxRemoteSnapshot
+	SnapshotSourceNative = forge.SnapshotSourceNative
 )
 
 var (
@@ -62,4 +65,13 @@ func validateRemotePath(value string) (string, error) { return forge.ValidateRem
 func normalizeServerURL(value string) (string, error) { return forge.NormalizeServerURL(value) }
 func readBounded(reader io.Reader, limit int64) ([]byte, error) {
 	return forge.ReadBounded(reader, limit)
+}
+func ArtifactFromBytes(data []byte, source SnapshotSource) (*SnapshotArtifact, error) {
+	return forge.ArtifactFromBytes(data, source)
+}
+func readBlobBatch(ctx context.Context, remote Forge, ref RepositoryRef, files map[string]RemoteFile, concurrency int) (map[string]*SnapshotArtifact, error) {
+	return forge.ReadBlobBatch(ctx, remote, ref, files, concurrency)
+}
+func closeArtifacts(artifacts map[string]*SnapshotArtifact) error {
+	return forge.CloseArtifacts(artifacts)
 }

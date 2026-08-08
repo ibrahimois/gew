@@ -9,6 +9,10 @@ Execute the plans below in dependency order. The executor must read each plan
 completely before starting, honor every STOP condition, and update its status
 row when finished. Plans 002–005 are the v0.6.0 reliability and release stream
 derived from the live GitHub/Gitea v0.5.0 publication on 2026-08-08.
+Plans 006–010 are the REST-native synchronization performance stream. They
+preserve exact-revision reads, atomic expected-head writes, ambiguous-response
+reconciliation, one local commit per remote commit, and the prohibition on Git
+transport or provider subprocesses.
 
 ## Execution order and status
 
@@ -19,6 +23,11 @@ derived from the live GitHub/Gitea v0.5.0 publication on 2026-08-08.
 | [003](003-self-healing-push-and-large-gitea-commits.md) | Make ambiguous pushes self-healing and large Gitea commits recoverable | P1 | L | 002 | DONE |
 | [004](004-fallback-when-native-archives-fail.md) | Fall back to Tree+Blob when native archives fail | P1 | M | 002 | DONE |
 | [005](005-publish-forge-native-releases.md) | Publish tags and hosted releases through Gew | P1 | L | 002, 003 | DONE |
+| [006](006-measure-and-short-circuit-sync.md) | Measure sync phases and make unchanged pulls constant-time | P1 | M | — | DONE |
+| [007](007-stream-exact-revision-snapshots.md) | Stream exact-revision snapshots through bounded artifacts | P1 | L | 006 | DONE |
+| [008](008-capability-driven-rest-snapshots.md) | Select fast REST snapshot strategies per provider | P1 | L | 007 | DONE |
+| [009](009-transactional-delta-pull.md) | Pull REST manifests and apply only changed paths | P1 | L | 006, 007, 008 | DONE |
+| [010](010-rest-native-push-proof.md) | Prove REST pushes without downloading the repository per commit | P1 | L | 006, 008, 009 | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 `REJECTED (<reason>)`.
@@ -34,6 +43,11 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 | Fixed 90-second request deadline could not be tuned | 002 |
 | CLI tests inherited an enclosing `.gew` workspace | Resolved in 001/v0.5.0; regression retained |
 | Gew could not create tags or GitHub/Gitea hosted Release records | 005 |
+| Unchanged pull hashes/materializes the complete local repository | 006 |
+| Snapshots and Git remote trees are buffered as repository-sized byte values | 007 |
+| Azure/Bitbucket fallback performs one serial Blob REST call per file | 008 |
+| A one-file pull downloads and reinstalls the complete repository | 009 |
+| Push refetches/verifies the complete remote tree per queued commit | 010 |
 
 ## Dependency notes
 
@@ -52,6 +66,21 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
   never blindly retry a mutation; reconcile remote state first.
 - Plan 005 is the v0.6.0 feature boundary. It removes the need to finish a Gew
   release with `gh release` or direct Gitea API calls.
+- Plan 006 is the performance characterization gate. Its request-count fixtures
+  and observer must land before later plans change the work graph.
+- Plan 007 changes snapshot ownership and must precede Plan 008 so bounded
+  parallel readers spool to bounded artifacts instead of multiplying heap use.
+- Plan 008 owns provider read capabilities, Azure's documented exact-commit ZIP,
+  and bounded fallback concurrency. This intentionally supersedes Plan 004's
+  out-of-scope deferral of parallel Blob reads without changing Plan 004's
+  native-first or validation rules.
+- Plan 009 depends on exact REST Tree/Blob semantics from Plan 008 and bounded
+  content ingestion from Plan 007. It changes state/recovery before Plan 010
+  relies on manifests for incremental push checkpointing.
+- Plan 010 is last because push proof is the highest-risk change. It must reuse
+  Plan 003's no-blind-mutation-retry policy and Plan 009's manifest model.
+- Plans 007 and 008 may be developed on separate branches only if 008 is rebased
+  onto the final artifact API before review. Plans 009 and 010 are sequential.
 
 ## Findings considered and rejected
 
@@ -80,3 +109,19 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
   003 adds streaming, diagnosis, and a safe uncommit/re-stage escape hatch.
 - **Remove native archives and always fetch every blob**: rejected. Exact-
   revision archives remain the fast path; Plan 004 adds a bounded fallback.
+- **Use Git smart HTTP/SSH or shell out to Git for speed**: rejected. REST-only
+  synchronization is GEW's product purpose; Plans 006–010 optimize REST request
+  counts, streaming, and proof instead.
+- **Rewrite the CLI in Rust, C#, or another language**: rejected. The measured
+  costs are full-repository algorithms and serial REST waterfalls; Go already
+  provides the streaming and bounded-concurrency primitives required.
+- **Make fallback Blob concurrency unbounded**: rejected. SaaS throttling,
+  cancellation, memory, and retry amplification require small provider-specific
+  ceilings proven under race tests.
+- **Remove remote verification after push**: rejected. Plan 010 replaces full
+  snapshots with explicit REST mutation/tree/changed-byte proof and retains a
+  strict fallback; it does not trust HEAD alone.
+- **Make provider compare APIs mandatory for delta pull**: rejected. Exact-
+  commit Tree metadata is the portable REST contract. Compare endpoints may
+  optimize candidates, but Plan 009 validates against Tree and works without
+  provider-specific compare support.

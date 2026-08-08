@@ -21,6 +21,7 @@ type indexEntry struct {
 	Kind   string `json:"kind"`
 	Object string `json:"object,omitempty"`
 	Mode   uint32 `json:"mode,omitempty"`
+	Size   int64  `json:"size,omitempty"`
 }
 
 type stageIndex struct {
@@ -35,6 +36,8 @@ type commitChange struct {
 	Mode            uint32 `json:"mode,omitempty"`
 	PreviousObject  string `json:"previous_object,omitempty"`
 	PreviousMode    uint32 `json:"previous_mode,omitempty"`
+	Size            int64  `json:"size,omitempty"`
+	PreviousSize    int64  `json:"previous_size,omitempty"`
 	PreviousExisted bool   `json:"previous_existed,omitempty"`
 }
 
@@ -111,13 +114,13 @@ func (a app) addOperation(_ context.Context, options addOptions) error {
 			if err := storeObjectFromFile(root, filePath, after.Hash); err != nil {
 				return err
 			}
-			index.Entries[filePath] = indexEntry{Kind: "created", Object: after.Hash, Mode: after.Mode}
+			index.Entries[filePath] = indexEntry{Kind: "created", Object: after.Hash, Mode: after.Mode, Size: after.Size}
 			staged++
 		case existedBefore && existsNow && before.Hash != after.Hash:
 			if err := storeObjectFromFile(root, filePath, after.Hash); err != nil {
 				return err
 			}
-			index.Entries[filePath] = indexEntry{Kind: "modified", Object: after.Hash, Mode: after.Mode}
+			index.Entries[filePath] = indexEntry{Kind: "modified", Object: after.Hash, Mode: after.Mode, Size: after.Size}
 			staged++
 		default:
 			delete(index.Entries, filePath)
@@ -212,11 +215,12 @@ func (a app) commitOperation(_ context.Context, options commitOptions) error {
 	for _, filePath := range paths {
 		entry := index.Entries[filePath]
 		change := commitChange{
-			Kind: entry.Kind, Path: filePath, Object: entry.Object, Mode: entry.Mode,
+			Kind: entry.Kind, Path: filePath, Object: entry.Object, Mode: entry.Mode, Size: entry.Size,
 		}
 		if previous, exists := state.Files[filePath]; exists {
 			change.PreviousObject = previous.Hash
 			change.PreviousMode = previous.Mode
+			change.PreviousSize = previous.Size
 			change.PreviousExisted = true
 		}
 		changes = append(changes, change)
@@ -240,7 +244,7 @@ func (a app) commitOperation(_ context.Context, options commitOptions) error {
 		case "deleted":
 			delete(state.Files, item.Path)
 		case "created", "modified":
-			state.Files[item.Path] = fileState{Hash: item.Object, Mode: item.Mode}
+			state.Files[item.Path] = fileState{Hash: item.Object, Mode: item.Mode, Size: item.Size}
 		default:
 			return fmt.Errorf("unsupported staged change kind %q", item.Kind)
 		}
@@ -309,9 +313,9 @@ func (a app) uncommitOperation(_ context.Context) error {
 		if change.Kind != "created" && !change.PreviousExisted {
 			return fmt.Errorf("commit %.12s predates reversible commit metadata; recreate or migrate the workspace", commit.ID)
 		}
-		index.Entries[change.Path] = indexEntry{Kind: change.Kind, Object: change.Object, Mode: change.Mode}
+		index.Entries[change.Path] = indexEntry{Kind: change.Kind, Object: change.Object, Mode: change.Mode, Size: change.Size}
 		if change.PreviousExisted {
-			state.Files[change.Path] = fileState{Hash: change.PreviousObject, Mode: change.PreviousMode}
+			state.Files[change.Path] = fileState{Hash: change.PreviousObject, Mode: change.PreviousMode, Size: change.PreviousSize}
 		} else {
 			delete(state.Files, change.Path)
 		}
@@ -479,7 +483,7 @@ func effectiveIndexFiles(base map[string]fileState, index stageIndex) map[string
 		if entry.Kind == "deleted" {
 			delete(result, filePath)
 		} else {
-			result[filePath] = fileState{Hash: entry.Object, Mode: entry.Mode}
+			result[filePath] = fileState{Hash: entry.Object, Mode: entry.Mode, Size: entry.Size}
 		}
 	}
 	return result

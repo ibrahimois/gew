@@ -122,7 +122,7 @@ func newBitbucketForgeWithAPI(p forge.Config, apiBase string) (*bitbucketForge, 
 func (b *bitbucketForge) Kind() forge.ForgeKind { return forge.ForgeBitbucket }
 
 func (b *bitbucketForge) Capabilities() forge.ForgeCapabilities {
-	return forge.ForgeCapabilities{BranchCreate: true, Push: bitbucketPushVerified}
+	return forge.ForgeCapabilities{BranchCreate: true, Push: bitbucketPushVerified, RecursiveTree: true, ReadConcurrency: 4, PushProof: forge.PushProofStrict}
 }
 
 func (b *bitbucketForge) Probe(ctx context.Context) error {
@@ -176,7 +176,7 @@ func (b *bitbucketForge) Head(ctx context.Context, ref forge.RepositoryRef, bran
 
 func (b *bitbucketForge) Tree(ctx context.Context, ref forge.RepositoryRef, commit string) (map[string]forge.RemoteFile, error) {
 	result := make(map[string]forge.RemoteFile)
-	endpoint := bitbucketRepoAPIPath(ref) + "/src/" + url.PathEscape(commit) + "/"
+	endpoint := bitbucketRepoAPIPath(ref) + "/src/" + url.PathEscape(commit) + "/?max_depth=100"
 	for endpoint != "" {
 		var page bitbucketTreePage
 		if err := b.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &page); err != nil {
@@ -225,7 +225,7 @@ func (b *bitbucketForge) Tree(ctx context.Context, ref forge.RepositoryRef, comm
 	for len(directories) > 0 {
 		directory := directories[0]
 		directories = directories[1:]
-		endpoint = bitbucketRepoAPIPath(ref) + "/src/" + url.PathEscape(commit) + "/" + escapeRemotePath(directory) + "/"
+		endpoint = bitbucketRepoAPIPath(ref) + "/src/" + url.PathEscape(commit) + "/" + escapeRemotePath(directory) + "/?max_depth=100"
 		for endpoint != "" {
 			var page bitbucketTreePage
 			if err := b.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &page); err != nil {

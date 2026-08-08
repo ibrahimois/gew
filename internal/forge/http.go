@@ -239,6 +239,38 @@ func (r *HTTPRequester) Download(ctx context.Context, endpoint string) ([]byte, 
 	return ReadBounded(response.Body, r.maxBytes)
 }
 
+// DownloadArtifact streams a bounded successful response into an owned 0600
+// temporary file. The artifact is removed on every error path.
+func (r *HTTPRequester) DownloadArtifact(ctx context.Context, endpoint string, source SnapshotSource) (*SnapshotArtifact, error) {
+	response, err := r.do(ctx, http.MethodGet, endpoint, func() io.Reader { return nil }, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		data, _ := ReadBounded(response.Body, MaxRemoteError)
+		return nil, &RemoteError{Kind: r.kind, Status: response.StatusCode, Method: http.MethodGet, URL: SanitizeEndpoint(endpoint), Body: r.Redact(string(data))}
+	}
+	artifact, err := NewSnapshotArtifact(source)
+	if err != nil {
+		return nil, err
+	}
+	written, copyErr := io.Copy(artifact, io.LimitReader(response.Body, r.maxBytes+1))
+	if copyErr == nil && written > r.maxBytes {
+		copyErr = fmt.Errorf("remote response exceeds %d bytes", r.maxBytes)
+	}
+	if copyErr == nil {
+		copyErr = ctx.Err()
+	}
+	if copyErr != nil {
+		return nil, errors.Join(copyErr, artifact.Close())
+	}
+	if err := artifact.Sync(); err != nil {
+		return nil, errors.Join(err, artifact.Close())
+	}
+	return artifact, nil
+}
+
 func (r *HTTPRequester) DownloadReader(ctx context.Context, endpoint, accept string) (io.ReadCloser, error) {
 	response, err := r.do(ctx, http.MethodGet, endpoint, func() io.Reader { return nil }, func(request *http.Request) {
 		if accept != "" {
@@ -270,6 +302,12 @@ func (r *HTTPRequester) do(ctx context.Context, method, endpoint string, body fu
 			configure(request)
 		}
 		response, err := r.client.Do(request)
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		willRetry := attempt < attempts && ((err == nil && retryableStatus(status)) || (err != nil && retryableTransportError(err)))
+		observeRequest(ctx, RequestEvent{Kind: r.kind, Method: method, Attempt: attempt, Status: status, Retry: willRetry})
 		if err == nil && !retryableStatus(response.StatusCode) {
 			return response, nil
 		}

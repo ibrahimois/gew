@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gew/internal/forge"
 )
@@ -152,7 +153,7 @@ func githubAPIBase(server string) (string, error) {
 func (g *githubForge) Kind() forge.ForgeKind { return forge.ForgeGitHub }
 
 func (g *githubForge) Capabilities() forge.ForgeCapabilities {
-	return forge.ForgeCapabilities{BranchCreate: true, Push: true}
+	return forge.ForgeCapabilities{BranchCreate: true, Push: true, NativeSnapshot: true, RecursiveTree: true, TreeIdentity: true, ReadConcurrency: 4, PushProof: forge.PushProofTree}
 }
 
 func (g *githubForge) Probe(ctx context.Context) error {
@@ -295,9 +296,9 @@ func (g *githubForge) Blob(ctx context.Context, ref forge.RepositoryRef, file fo
 	return decoded, nil
 }
 
-func (g *githubForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) ([]byte, error) {
+func (g *githubForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) (*forge.SnapshotArtifact, error) {
 	endpoint := githubRepoAPIPath(ref) + "/zipball/" + url.PathEscape(revision)
-	return g.requester.Download(ctx, endpoint)
+	return g.requester.DownloadArtifact(ctx, endpoint, forge.SnapshotSourceNative)
 }
 
 func (g *githubForge) CommitDetails(ctx context.Context, ref forge.RepositoryRef, commit string) (forge.RemoteCommit, error) {
@@ -357,30 +358,83 @@ func (g *githubForge) ApplyCommit(ctx context.Context, request forge.ApplyCommit
 		Type string  `json:"type"`
 		SHA  *string `json:"sha"`
 	}
-	items := make([]treeItem, 0, len(request.Changes))
+	items := make([]treeItem, len(request.Changes))
+	changed := make(map[string]forge.RemoteFile, len(request.Changes))
+	jobs := make(chan int)
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var group sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	worker := func() {
+		defer group.Done()
+		for index := range jobs {
+			change := request.Changes[index]
+			var blob githubBlobResponse
+			payload := map[string]string{"content": base64.StdEncoding.EncodeToString(change.Content), "encoding": "base64"}
+			if err := g.requester.DoJSON(workCtx, http.MethodPost, githubRepoAPIPath(request.Repository)+"/git/blobs", payload, &blob); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				continue
+			}
+			if blob.SHA == "" {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = errors.New("github returned an empty blob ID")
+					cancel()
+				}
+				mu.Unlock()
+				continue
+			}
+			items[index].SHA = &blob.SHA
+			mu.Lock()
+			changed[change.Path] = forge.RemoteFile{BlobID: blob.SHA, Mode: change.Mode, Size: int64(len(change.Content))}
+			mu.Unlock()
+		}
+	}
+	workers := 0
 	for _, change := range request.Changes {
+		if change.Operation != "delete" {
+			workers++
+		}
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	group.Add(workers)
+	for index := 0; index < workers; index++ {
+		go worker()
+	}
+	for index, change := range request.Changes {
 		mode := "100644"
 		if change.Mode&0o111 != 0 {
 			mode = "100755"
 		}
-		item := treeItem{Path: change.Path, Mode: mode, Type: "blob"}
+		items[index] = treeItem{Path: change.Path, Mode: mode, Type: "blob"}
 		switch change.Operation {
 		case "delete":
-			item.SHA = nil
+			mu.Lock()
+			changed[change.Path] = forge.RemoteFile{Mode: change.Mode}
+			mu.Unlock()
 		case "create", "update":
-			var blob githubBlobResponse
-			payload := map[string]string{"content": base64.StdEncoding.EncodeToString(change.Content), "encoding": "base64"}
-			if err := g.requester.DoJSON(ctx, http.MethodPost, githubRepoAPIPath(request.Repository)+"/git/blobs", payload, &blob); err != nil {
-				return forge.ApplyCommitResult{}, err
+			select {
+			case jobs <- index:
+			case <-workCtx.Done():
 			}
-			if blob.SHA == "" {
-				return forge.ApplyCommitResult{}, errors.New("github returned an empty blob ID")
-			}
-			item.SHA = &blob.SHA
 		default:
+			close(jobs)
+			group.Wait()
 			return forge.ApplyCommitResult{}, fmt.Errorf("unsupported remote change operation %q", change.Operation)
 		}
-		items = append(items, item)
+	}
+	close(jobs)
+	group.Wait()
+	if firstErr != nil {
+		return forge.ApplyCommitResult{}, firstErr
 	}
 	var tree githubTreeResponse
 	treePayload := struct {
@@ -433,7 +487,7 @@ func (g *githubForge) ApplyCommit(ctx context.Context, request forge.ApplyCommit
 			return forge.ApplyCommitResult{}, errors.New("github updated branch points to an unexpected commit")
 		}
 	}
-	return forge.ApplyCommitResult{CommitID: created.SHA, ParentIDs: []string{request.ExpectedHead}, ConditionalRef: true}, nil
+	return forge.ApplyCommitResult{CommitID: created.SHA, ParentIDs: []string{request.ExpectedHead}, ConditionalRef: true, TargetHead: created.SHA, TreeID: tree.SHA, ChangedFiles: changed}, nil
 }
 
 func (g *githubForge) FindReleaseByTag(ctx context.Context, ref forge.RepositoryRef, tag string) (forge.RemoteRelease, error) {

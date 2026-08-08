@@ -25,8 +25,10 @@ type azureForge struct {
 }
 
 var (
-	_ forge.Forge             = (*azureForge)(nil)
-	_ forge.ForgeCommitWriter = (*azureForge)(nil)
+	_ forge.Forge                   = (*azureForge)(nil)
+	_ forge.ForgeSnapshotter        = (*azureForge)(nil)
+	_ forge.ForgeCommitWriter       = (*azureForge)(nil)
+	_ forge.ForgeRevisionBlobReader = (*azureForge)(nil)
 )
 
 type azureRepository struct {
@@ -98,7 +100,7 @@ func newAzureForgeWithAPI(p forge.Config, apiBase, organization string) (*azureF
 func (a *azureForge) Kind() forge.ForgeKind { return forge.ForgeAzure }
 
 func (a *azureForge) Capabilities() forge.ForgeCapabilities {
-	return forge.ForgeCapabilities{BranchCreate: true, Push: true}
+	return forge.ForgeCapabilities{BranchCreate: true, Push: true, NativeSnapshot: true, RecursiveTree: true, ReadConcurrency: 8, PushProof: forge.PushProofChangedBytes}
 }
 
 func (a *azureForge) Probe(ctx context.Context) error {
@@ -200,6 +202,30 @@ func (a *azureForge) Blob(ctx context.Context, ref forge.RepositoryRef, file for
 	return a.requester.Download(ctx, azureQuery(azureRepoAPIPath(ref)+"/items", query))
 }
 
+func (a *azureForge) BlobAtRevision(ctx context.Context, ref forge.RepositoryRef, revision, filePath string) ([]byte, forge.RemoteFile, error) {
+	cleaned, err := forge.ValidateRemotePath(filePath)
+	if err != nil {
+		return nil, forge.RemoteFile{}, err
+	}
+	query := map[string]string{
+		"path": "/" + cleaned, "$format": "octetStream",
+		"versionDescriptor.version": revision, "versionDescriptor.versionType": "commit",
+	}
+	content, err := a.requester.Download(ctx, azureQuery(azureRepoAPIPath(ref)+"/items", query))
+	return content, forge.RemoteFile{BlobID: azureBlobID(revision, cleaned), Mode: 0o100644, Size: int64(len(content))}, err
+}
+
+func (a *azureForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) (*forge.SnapshotArtifact, error) {
+	if strings.TrimSpace(revision) == "" {
+		return nil, errors.New("azure snapshot requires an exact commit ID")
+	}
+	query := map[string]string{
+		"scopePath": "/", "$format": "zip", "download": "true", "zipForUnix": "true",
+		"versionDescriptor.version": revision, "versionDescriptor.versionType": "commit",
+	}
+	return a.requester.DownloadArtifact(ctx, azureQuery(azureRepoAPIPath(ref)+"/items", query), forge.SnapshotSourceNative)
+}
+
 func (a *azureForge) CommitDetails(ctx context.Context, ref forge.RepositoryRef, commit string) (forge.RemoteCommit, error) {
 	var response azureCommit
 	endpoint := azureRepoAPIPath(ref) + "/commits/" + url.PathEscape(commit)
@@ -286,7 +312,16 @@ func (a *azureForge) ApplyCommit(ctx context.Context, request forge.ApplyCommitR
 	if request.NewBranch != "" && update.OldObjectID != "" && update.OldObjectID != azureZeroOID && update.OldObjectID != oldObjectID {
 		return forge.ApplyCommitResult{}, errors.New("azure devops new-branch response reported an unexpected previous head")
 	}
-	result := forge.ApplyCommitResult{CommitID: commit.CommitID, ParentIDs: append([]string(nil), commit.Parents...), ConditionalRef: true}
+	changed := make(map[string]forge.RemoteFile, len(request.Changes))
+	for _, change := range request.Changes {
+		metadata := forge.RemoteFile{Mode: change.Mode}
+		if change.Operation != "delete" {
+			metadata.BlobID = azureBlobID(commit.CommitID, change.Path)
+			metadata.Size = int64(len(change.Content))
+		}
+		changed[change.Path] = metadata
+	}
+	result := forge.ApplyCommitResult{CommitID: commit.CommitID, ParentIDs: append([]string(nil), commit.Parents...), ConditionalRef: true, TargetHead: commit.CommitID, ChangedFiles: changed}
 	if request.ExpectedHead != "" && len(result.ParentIDs) > 0 && result.ParentIDs[0] != request.ExpectedHead {
 		return forge.ApplyCommitResult{}, errors.New("azure devops created the commit from an unexpected parent")
 	}

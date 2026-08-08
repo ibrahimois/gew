@@ -68,7 +68,14 @@ func FromConfig(p forge.Config) (forge.Forge, error) {
 	if p.AuthKind == "" {
 		p.AuthKind = definition.DefaultAuth
 	}
-	return definition.Factory(p)
+	remote, err := definition.Factory(p)
+	if err != nil {
+		return nil, err
+	}
+	if err := forge.ValidateCapabilities(remote); err != nil {
+		return nil, err
+	}
+	return remote, nil
 }
 
 func DefaultAuthKind(kind forge.ForgeKind) forge.AuthKind {

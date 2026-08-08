@@ -107,7 +107,7 @@ func New(p forge.Config) (*gitLabForge, error) {
 func (g *gitLabForge) Kind() forge.ForgeKind { return forge.ForgeGitLab }
 
 func (g *gitLabForge) Capabilities() forge.ForgeCapabilities {
-	return forge.ForgeCapabilities{BranchCreate: true, Push: gitLabPushVerified}
+	return forge.ForgeCapabilities{BranchCreate: true, Push: gitLabPushVerified, NativeSnapshot: true, RecursiveTree: true, ReadConcurrency: 4, PushProof: forge.PushProofStrict}
 }
 
 func (g *gitLabForge) Probe(ctx context.Context) error {
@@ -197,9 +197,9 @@ func (g *gitLabForge) Blob(ctx context.Context, ref forge.RepositoryRef, file fo
 	return content, nil
 }
 
-func (g *gitLabForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) ([]byte, error) {
+func (g *gitLabForge) Snapshot(ctx context.Context, ref forge.RepositoryRef, revision string) (*forge.SnapshotArtifact, error) {
 	endpoint := gitLabProjectAPIPath(ref) + "/repository/archive.zip?" + url.Values{"sha": {revision}}.Encode()
-	return g.requester.Download(ctx, endpoint)
+	return g.requester.DownloadArtifact(ctx, endpoint, forge.SnapshotSourceNative)
 }
 
 func (g *gitLabForge) CommitDetails(ctx context.Context, ref forge.RepositoryRef, commit string) (forge.RemoteCommit, error) {

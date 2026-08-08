@@ -23,7 +23,7 @@ func TestAzureForgeContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forgetest.RunBaseContract(t, forge, forgecore.ForgeAzure, false, true, true)
+	forgetest.RunBaseContract(t, forge, forgecore.ForgeAzure, true, true, true)
 }
 
 func TestAzureServerAndRepositoryParsing(t *testing.T) {
@@ -106,6 +106,14 @@ func TestAzureHeadTreeBlobAndSnapshotPinCommit(t *testing.T) {
 				{"objectId": "tree", "gitObjectType": "tree", "commitId": "commit", "path": "/", "isFolder": true},
 				{"objectId": "blob", "gitObjectType": "blob", "commitId": "commit", "path": "/dir/file.bin", "contentLength": 3},
 			}})
+		case strings.HasSuffix(request.URL.Path, "/items") && query.Get("$format") == "zip":
+			if query.Get("versionDescriptor.version") != "commit" || query.Get("versionDescriptor.versionType") != "commit" || query.Get("download") != "true" || query.Get("zipForUnix") != "true" {
+				t.Fatalf("snapshot query = %s", request.URL.RawQuery)
+			}
+			writer := zip.NewWriter(response)
+			entry, _ := writer.Create("repo-commit/dir/file.bin")
+			entry.Write([]byte{'a', 0, 'b'})
+			writer.Close()
 		case strings.HasSuffix(request.URL.Path, "/items"):
 			if query.Get("path") != "/dir/file.bin" || query.Get("versionDescriptor.version") != "commit" || query.Get("$format") != "octetStream" {
 				t.Fatalf("blob query = %s", request.URL.RawQuery)
@@ -134,7 +142,8 @@ func TestAzureHeadTreeBlobAndSnapshotPinCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	defer archive.Close()
+	reader, err := zip.NewReader(archive, archive.Size())
 	if err != nil || len(reader.File) != 1 || reader.File[0].Name != "repo-commit/dir/file.bin" {
 		t.Fatalf("zip = %#v, %v", reader.File, err)
 	}

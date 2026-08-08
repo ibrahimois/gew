@@ -6,6 +6,7 @@ type WorkspaceBackendKind = workspace.BackendKind
 type hybridState = workspace.HybridState
 type preparedGitExport = workspace.PreparedGitExport
 type gitExportReceipt = workspace.GitExportReceipt
+type fileState = workspace.ManifestEntry
 
 const (
 	WorkspaceGew = workspace.Gew

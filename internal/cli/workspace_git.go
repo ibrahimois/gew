@@ -18,7 +18,9 @@ import (
 	git "github.com/go-git/go-git/v5"
 	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/utils/merkletrie"
 )
 
 const exportReceiptVersion = 1
@@ -605,6 +607,7 @@ func remoteByteSnapshot(ctx context.Context, remote Forge, ref RepositoryRef, co
 	if err != nil {
 		return nil, nil, err
 	}
+	defer snapshot.Close()
 	files := snapshot.Files
 	if files == nil {
 		files, err = remote.Tree(ctx, ref, commit)
@@ -617,7 +620,7 @@ func remoteByteSnapshot(ctx context.Context, remote Forge, ref RepositoryRef, co
 		return nil, nil, err
 	}
 	defer os.RemoveAll(directory)
-	if err := extractArchive(snapshot.Archive, directory); err != nil {
+	if _, err := extractSnapshot(snapshot.Artifact, directory); err != nil {
 		return nil, nil, err
 	}
 	result, err := gitWorktreeSnapshot(directory)
@@ -665,7 +668,23 @@ func (a app) gitPull(ctx context.Context, root string, state workspaceState, rem
 	} else if mergeState != nil {
 		return errors.New("a merge is already in progress; continue or abort it first")
 	}
+	finishPhase := a.sync.phase("head")
+	remoteHead, err := remote.Head(ctx, state.Remote, state.Branch)
+	finishPhase()
+	if err != nil {
+		if isRemoteNotFound(err) && state.BaseCommit == "" {
+			fmt.Fprintln(a.out, "Already up to date (remote repository is empty).")
+			return nil
+		}
+		return err
+	}
+	if remoteHead == state.BaseCommit {
+		fmt.Fprintln(a.out, "Already up to date.")
+		return nil
+	}
+	finishPhase = a.sync.phase("scan")
 	headFiles, indexFiles, worktreeFiles, err := gitSnapshots(repository, worktree)
+	finishPhase()
 	if err != nil {
 		return err
 	}
@@ -678,18 +697,6 @@ func (a app) gitPull(ctx context.Context, root string, state workspaceState, rem
 	pending, err := pendingGitCommits(repository, state.Hybrid.TrackingRef)
 	if err != nil {
 		return err
-	}
-	remoteHead, err := remote.Head(ctx, state.Remote, state.Branch)
-	if err != nil {
-		if isRemoteNotFound(err) && state.BaseCommit == "" {
-			fmt.Fprintln(a.out, "Already up to date (remote repository is empty).")
-			return nil
-		}
-		return err
-	}
-	if remoteHead == state.BaseCommit {
-		fmt.Fprintln(a.out, "Already up to date.")
-		return nil
 	}
 	if ffOnly && len(pending) != 0 {
 		return errors.New("fast-forward pull is not possible with unpushed local Git commits")
@@ -859,7 +866,7 @@ func mergeFileMetadataFromBytes(files map[string][]byte, remote map[string]Remot
 	result := make(map[string]fileState, len(files))
 	for filePath, content := range files {
 		sum := sha256.Sum256(content)
-		metadata := fileState{Hash: hex.EncodeToString(sum[:]), Mode: 0o644}
+		metadata := fileState{Hash: hex.EncodeToString(sum[:]), Mode: 0o644, Size: int64(len(content))}
 		if item, ok := remote[filePath]; ok {
 			metadata.BlobSHA = item.BlobID
 			if item.Mode != 0 {
@@ -982,32 +989,71 @@ func pendingGitCommits(repository *git.Repository, trackingRef string) ([]*objec
 }
 
 func gitRemoteChanges(repository *git.Repository, commit *object.Commit, remoteFiles map[string]RemoteFile) ([]RemoteChange, error) {
-	after, err := gitCommitSnapshot(repository, commit.Hash)
+	after, err := commit.Tree()
 	if err != nil {
 		return nil, err
 	}
-	before := make(map[string][]byte)
+	before := &object.Tree{}
 	if len(commit.ParentHashes) > 0 {
-		before, err = gitCommitSnapshot(repository, commit.ParentHashes[0])
+		parent, parentErr := repository.CommitObject(commit.ParentHashes[0])
+		if parentErr != nil {
+			return nil, parentErr
+		}
+		before, err = parent.Tree()
 		if err != nil {
 			return nil, err
 		}
 	}
-	changes := byteSnapshotChanges(before, after)
+	changes, err := object.DiffTree(before, after)
+	if err != nil {
+		return nil, err
+	}
+	sort.Sort(changes)
 	result := make([]RemoteChange, 0, len(changes))
 	for _, item := range changes {
+		action, err := item.Action()
+		if err != nil {
+			return nil, err
+		}
+		from, to, err := item.Files()
+		if err != nil {
+			return nil, err
+		}
 		operation := "update"
-		switch item.Kind {
-		case "created":
+		filePath := item.To.Name
+		mode := uint32(0o100644)
+		switch action {
+		case merkletrie.Insert:
 			operation = "create"
-		case "deleted":
+		case merkletrie.Delete:
 			operation = "delete"
+			filePath = item.From.Name
+		case merkletrie.Modify:
+		default:
+			return nil, fmt.Errorf("unsupported Git tree change action %s", action)
 		}
-		change := RemoteChange{Path: item.Path, Operation: operation}
-		if item.Kind != "deleted" {
-			change.Content = after[item.Path]
+		change := RemoteChange{Path: filePath, Operation: operation}
+		if action != merkletrie.Delete {
+			if to == nil {
+				return nil, fmt.Errorf("Git tree change %s has no target file", filePath)
+			}
+			reader, err := to.Reader()
+			if err != nil {
+				return nil, err
+			}
+			change.Content, err = io.ReadAll(reader)
+			closeErr := reader.Close()
+			if err := errors.Join(err, closeErr); err != nil {
+				return nil, err
+			}
+			if to.Mode == filemode.Executable {
+				mode = 0o100755
+			}
+		} else if from != nil && from.Mode == filemode.Executable {
+			mode = 0o100755
 		}
-		if remote, ok := remoteFiles[item.Path]; ok {
+		change.Mode = mode
+		if remote, ok := remoteFiles[filePath]; ok {
 			change.BlobID = remote.BlobID
 			change.LastCommitID = remote.LastCommitID
 		}
@@ -1081,6 +1127,7 @@ func verifyRemoteTree(ctx context.Context, remote Forge, ref RepositoryRef, comm
 	if err != nil {
 		return err
 	}
+	defer snapshot.Close()
 	files := snapshot.Files
 	if files == nil {
 		files, err = remote.Tree(ctx, ref, commit)
@@ -1096,7 +1143,7 @@ func verifyRemoteTree(ctx context.Context, remote Forge, ref RepositoryRef, comm
 		return err
 	}
 	defer os.RemoveAll(directory)
-	if err := extractArchive(snapshot.Archive, directory); err != nil {
+	if _, err := extractSnapshot(snapshot.Artifact, directory); err != nil {
 		return err
 	}
 	actual, err := gitWorktreeSnapshot(directory)
@@ -1215,7 +1262,9 @@ func (a app) gitPushWithForge(ctx context.Context, root string, state workspaceS
 	}
 	remoteFiles := make(map[string]RemoteFile)
 	if remoteHead != "" {
+		finishPhase := a.sync.phase("tree")
 		remoteFiles, err = remote.Tree(ctx, state.Remote, remoteHead)
+		finishPhase()
 		if err != nil {
 			return err
 		}
@@ -1253,7 +1302,9 @@ func (a app) gitPushWithForge(ctx context.Context, root string, state workspaceS
 		} else if index > 0 {
 			request.Branch = targetBranch
 		}
+		finishPhase := a.sync.phase("upload")
 		result, err := writer.ApplyCommit(ctx, request)
+		finishPhase()
 		if err != nil {
 			observedHead, headErr := remote.Head(ctx, state.Remote, targetBranch)
 			if headErr == nil && observedHead != remoteHead {
@@ -1277,20 +1328,13 @@ func (a app) gitPushWithForge(ctx context.Context, root string, state workspaceS
 			}
 			return fmt.Errorf("export of local commit %.12s remains prepared for reconciliation: %w", commit.Hash, err)
 		}
-		confirmedHead, err := remote.Head(ctx, state.Remote, targetBranch)
+		finishPhase = a.sync.phase("verify")
+		provenFiles, err := proveAppliedCommit(ctx, remote, writer, request, result, remoteFiles)
+		finishPhase()
 		if err != nil {
-			return fmt.Errorf("refresh provider head after exporting %.12s: %w", result.CommitID, err)
+			return fmt.Errorf("exported commit %.12s but proof failed: %w", result.CommitID, err)
 		}
-		if confirmedHead != result.CommitID {
-			return fmt.Errorf("provider did not confirm exported commit %.12s on %s (head %.12s)", result.CommitID, targetBranch, confirmedHead)
-		}
-		expectedTree, err := gitCommitSnapshot(repository, commit.Hash)
-		if err != nil {
-			return err
-		}
-		if err := verifyRemoteTree(ctx, remote, state.Remote, result.CommitID, expectedTree); err != nil {
-			return err
-		}
+		remoteFiles = provenFiles
 		receipt := gitExportReceipt{
 			Version: exportReceiptVersion, LocalOID: commit.Hash.String(), ProviderID: result.CommitID,
 			ProviderBase: remoteHead, Message: commit.Message, Paths: paths, Linearized: len(commit.ParentHashes) == 2,
@@ -1310,10 +1354,6 @@ func (a app) gitPushWithForge(ctx context.Context, root string, state workspaceS
 			return err
 		}
 		if err := os.Remove(exportPreparedPath(root)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		remoteFiles, err = remote.Tree(ctx, state.Remote, remoteHead)
-		if err != nil {
 			return err
 		}
 		fmt.Fprintf(a.out, "Exported %.12s as remote %.12s\n", commit.Hash, result.CommitID)
@@ -1380,12 +1420,29 @@ func reconcilePreparedGitExport(ctx context.Context, root string, state *workspa
 	if strings.Join(expectedPaths, "\x00") != strings.Join(actualPaths, "\x00") {
 		return false, nil
 	}
-	expectedTree, err := gitCommitSnapshot(repository, commit.Hash)
+	remoteFiles, err := remote.Tree(ctx, state.Remote, remoteHead)
 	if err != nil {
 		return false, err
 	}
-	if err := verifyRemoteTree(ctx, remote, state.Remote, remoteHead, expectedTree); err != nil {
-		return false, nil
+	changes, err := gitRemoteChanges(repository, commit, nil)
+	if err != nil {
+		return false, err
+	}
+	for _, change := range changes {
+		metadata, exists := remoteFiles[change.Path]
+		if change.Operation == "delete" {
+			if exists {
+				return false, nil
+			}
+			continue
+		}
+		if !exists {
+			return false, nil
+		}
+		content, err := remote.Blob(ctx, state.Remote, metadata)
+		if err != nil || !bytes.Equal(content, change.Content) {
+			return false, err
+		}
 	}
 	receipt := gitExportReceipt{
 		Version: exportReceiptVersion, LocalOID: commit.Hash.String(), ProviderID: remoteHead,
