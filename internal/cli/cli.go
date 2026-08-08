@@ -81,7 +81,11 @@ func (a app) loginOperation(ctx context.Context, options loginOptions) error {
 	if authKind == "" {
 		authKind = defaultAuthKind(kind)
 	}
-	p := profile{Provider: kind, URL: server, Token: token, AuthKind: authKind, Username: strings.TrimSpace(options.Username), Insecure: options.Insecure}
+	p := profile{
+		Provider: kind, URL: server, Token: token, AuthKind: authKind,
+		Username: strings.TrimSpace(options.Username), Insecure: options.Insecure,
+		RequestTimeout: strings.TrimSpace(options.RequestTimeout),
+	}
 	remote, err := forgeFromProfile(p)
 	if err != nil {
 		return err
@@ -180,13 +184,16 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 	if err != nil {
 		return err
 	}
-	archive, err := forgeSnapshot(ctx, remote, repositoryRef, commit)
+	snapshot, err := forgeSnapshot(ctx, remote, repositoryRef, commit)
 	if err != nil {
 		return err
 	}
-	remoteFiles, err := remote.Tree(ctx, repositoryRef, commit)
-	if err != nil {
-		return err
+	remoteFiles := snapshot.Files
+	if remoteFiles == nil {
+		remoteFiles, err = remote.Tree(ctx, repositoryRef, commit)
+		if err != nil {
+			return err
+		}
 	}
 
 	created := false
@@ -196,7 +203,7 @@ func (a app) cloneOperation(ctx context.Context, options cloneOptions) error {
 		}
 		created = true
 	}
-	if err := extractArchive(archive, absDestination); err != nil {
+	if err := extractArchive(snapshot.Archive, absDestination); err != nil {
 		if created {
 			_ = os.Remove(absDestination)
 		}
@@ -362,20 +369,23 @@ func (a app) pullOperation(ctx context.Context, ffOnly bool) error {
 		}
 		return a.mergeRemote(ctx, root, state, remote, commit, len(changes) != 0)
 	}
-	archive, err := forgeSnapshot(ctx, remote, state.Remote, commit)
+	snapshot, err := forgeSnapshot(ctx, remote, state.Remote, commit)
 	if err != nil {
 		return err
 	}
-	remoteFiles, err := remote.Tree(ctx, state.Remote, commit)
-	if err != nil {
-		return err
+	remoteFiles := snapshot.Files
+	if remoteFiles == nil {
+		remoteFiles, err = remote.Tree(ctx, state.Remote, commit)
+		if err != nil {
+			return err
+		}
 	}
 	stage, err := os.MkdirTemp("", "gew-pull-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(stage)
-	if err := extractArchive(archive, stage); err != nil {
+	if err := extractArchive(snapshot.Archive, stage); err != nil {
 		return err
 	}
 	if _, err := scanWorkspace(stage); err != nil {
@@ -483,6 +493,23 @@ func (a app) pushOperation(ctx context.Context, newBranch string) error {
 			if applyErr != nil {
 				if errors.Is(applyErr, ErrStaleHead) {
 					return fmt.Errorf("remote branch advanced; run 'gew pull' before pushing: %w", applyErr)
+				}
+				observedHead, headErr := remote.Head(ctx, state.Remote, targetBranch)
+				if headErr == nil && observedHead != remoteCommit {
+					reconciled, reconciledFiles, reconcileErr := reconcileAppliedCommit(ctx, remote, writer, root, &state, targetBranch, observedHead)
+					if reconcileErr != nil {
+						return errors.Join(applyErr, fmt.Errorf("reconcile ambiguous push: %w", reconcileErr))
+					}
+					if reconciled {
+						remoteCommit = observedHead
+						remoteFiles = reconciledFiles
+						pushed++
+						fmt.Fprintf(a.out, "Reconciled already-applied commit at %.12s after an ambiguous push.\n", observedHead)
+						continue
+					}
+				}
+				if headErr != nil {
+					return errors.Join(applyErr, fmt.Errorf("ambiguous push could not refresh branch state: %w", headErr))
 				}
 				return applyErr
 			}
@@ -691,6 +718,7 @@ func writeConfig(configPath string, cfg config) error {
 func profileFromConfig() (profile, error) {
 	serverEnv := strings.TrimSpace(os.Getenv("GEW_SERVER"))
 	tokenEnv := strings.TrimSpace(os.Getenv("GEW_TOKEN"))
+	timeoutEnv := strings.TrimSpace(os.Getenv("GEW_HTTP_TIMEOUT"))
 	if serverEnv != "" || tokenEnv != "" {
 		if serverEnv == "" || tokenEnv == "" {
 			return profile{}, errors.New("GEW_SERVER and GEW_TOKEN must be set together")
@@ -707,7 +735,10 @@ func profileFromConfig() (profile, error) {
 		if authKind == "" {
 			authKind = defaultAuthKind(kind)
 		}
-		return profile{Provider: kind, URL: server, Token: tokenEnv, AuthKind: authKind, Username: strings.TrimSpace(os.Getenv("GEW_USERNAME"))}, nil
+		return profile{
+			Provider: kind, URL: server, Token: tokenEnv, AuthKind: authKind,
+			Username: strings.TrimSpace(os.Getenv("GEW_USERNAME")), RequestTimeout: timeoutEnv,
+		}, nil
 	}
 	cfg, _, err := readConfig()
 	if err != nil {
@@ -726,6 +757,9 @@ func profileFromConfig() (profile, error) {
 	}
 	if selected.AuthKind == "" {
 		selected.AuthKind = defaultAuthKind(selected.Provider)
+	}
+	if timeoutEnv != "" {
+		selected.RequestTimeout = timeoutEnv
 	}
 	return selected, nil
 }

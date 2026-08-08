@@ -85,9 +85,13 @@ func newAzureForgeWithAPI(p forge.Config, apiBase, organization string) (*azureF
 		}
 		request.Header.Set("Authorization", "Bearer "+p.Token)
 	}
+	requester, err := forge.NewHTTPRequester(p, apiBase, auth, make(http.Header))
+	if err != nil {
+		return nil, err
+	}
 	return &azureForge{
 		server: strings.TrimRight(apiBase, "/"), organization: organization,
-		requester: forge.NewHTTPRequester(p, apiBase, auth, make(http.Header)),
+		requester: requester,
 	}, nil
 }
 

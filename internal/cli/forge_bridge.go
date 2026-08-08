@@ -22,6 +22,11 @@ type ApplyCommitResult = forge.ApplyCommitResult
 type ForgeCapabilities = forge.ForgeCapabilities
 type ForgeCommitInspector = forge.ForgeCommitInspector
 type ForgeCommitWriter = forge.ForgeCommitWriter
+type ForgeReleasePublisher = forge.ForgeReleasePublisher
+type RemoteRelease = forge.RemoteRelease
+type RemoteReleaseAsset = forge.RemoteReleaseAsset
+type CreateReleaseRequest = forge.CreateReleaseRequest
+type ForgeSnapshotResult = forge.SnapshotResult
 
 const (
 	ForgeGitea        = forge.ForgeGitea
@@ -34,8 +39,9 @@ const (
 )
 
 var (
-	ErrNotFound  = forge.ErrNotFound
-	ErrStaleHead = forge.ErrStaleHead
+	ErrNotFound    = forge.ErrNotFound
+	ErrStaleHead   = forge.ErrStaleHead
+	ErrUnsupported = forge.ErrUnsupported
 )
 
 func registeredForgeKinds() []ForgeKind                  { return registry.Kinds() }
@@ -45,8 +51,11 @@ func forgeFromProfile(p profile) (Forge, error)          { return registry.FromC
 func forgeWriter(remote Forge, newBranch bool) (ForgeCommitWriter, error) {
 	return forge.Writer(remote, newBranch)
 }
-func forgeSnapshot(ctx context.Context, remote Forge, ref RepositoryRef, revision string) ([]byte, error) {
-	return forge.Snapshot(ctx, remote, ref, revision)
+func forgeSnapshot(ctx context.Context, remote Forge, ref RepositoryRef, revision string) (ForgeSnapshotResult, error) {
+	return forge.SnapshotWithTree(ctx, remote, ref, revision)
+}
+func forgeReleasePublisher(remote Forge) (ForgeReleasePublisher, error) {
+	return forge.ReleasePublisher(remote)
 }
 func isRemoteNotFound(err error) bool                 { return forge.IsRemoteNotFound(err) }
 func validateRemotePath(value string) (string, error) { return forge.ValidateRemotePath(value) }

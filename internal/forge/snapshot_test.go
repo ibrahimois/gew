@@ -11,9 +11,22 @@ import (
 )
 
 type snapshotForge struct {
-	files   map[string]RemoteFile
-	blobs   map[string][]byte
-	blobErr error
+	files     map[string]RemoteFile
+	blobs     map[string][]byte
+	blobErr   error
+	treeCalls int
+}
+
+type nativeSnapshotForge struct {
+	*snapshotForge
+	archive []byte
+	err     error
+	calls   int
+}
+
+func (f *nativeSnapshotForge) Snapshot(context.Context, RepositoryRef, string) ([]byte, error) {
+	f.calls++
+	return append([]byte(nil), f.archive...), f.err
 }
 
 func (f *snapshotForge) Kind() ForgeKind                 { return ForgeKind("snapshot") }
@@ -26,6 +39,7 @@ func (f *snapshotForge) Head(context.Context, RepositoryRef, string) (string, er
 	return "revision", nil
 }
 func (f *snapshotForge) Tree(context.Context, RepositoryRef, string) (map[string]RemoteFile, error) {
+	f.treeCalls++
 	return f.files, nil
 }
 func (f *snapshotForge) Blob(_ context.Context, _ RepositoryRef, file RemoteFile) ([]byte, error) {
@@ -69,6 +83,59 @@ func TestForgeSnapshotFallbackContract(t *testing.T) {
 	entry.Close()
 	if !bytes.Equal(content, []byte{'a', 0, 'b'}) {
 		t.Fatalf("binary content = %v", content)
+	}
+}
+
+func TestForgeSnapshotFallsBackAfterNativeFailure(t *testing.T) {
+	remote := &nativeSnapshotForge{
+		snapshotForge: &snapshotForge{
+			files: map[string]RemoteFile{"README.md": {BlobID: "readme", Mode: 0o100644, Size: 5}},
+			blobs: map[string][]byte{"readme": []byte("hello")},
+		},
+		err: errors.New("archive endpoint unavailable"),
+	}
+	result, err := SnapshotWithTree(context.Background(), remote, RepositoryRef{Name: "demo"}, "revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.calls != 1 || remote.treeCalls != 1 || len(result.Files) != 1 {
+		t.Fatalf("native calls=%d tree calls=%d files=%d", remote.calls, remote.treeCalls, len(result.Files))
+	}
+	reader, err := zip.NewReader(bytes.NewReader(result.Archive), int64(len(result.Archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reader.File[0].Name; got != "demo-revision/README.md" {
+		t.Fatalf("archive entry = %q", got)
+	}
+}
+
+func TestForgeSnapshotDoesNotFallbackAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	remote := &nativeSnapshotForge{
+		snapshotForge: &snapshotForge{files: map[string]RemoteFile{"README.md": {BlobID: "readme"}}},
+		err:           context.Canceled,
+	}
+	_, err := Snapshot(ctx, remote, RepositoryRef{Name: "demo"}, "revision")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Snapshot error = %v, want context cancellation", err)
+	}
+}
+
+func TestForgeSnapshotJoinsNativeAndFallbackFailures(t *testing.T) {
+	nativeErr := errors.New("archive endpoint unavailable")
+	fallbackErr := errors.New("blob unavailable")
+	remote := &nativeSnapshotForge{
+		snapshotForge: &snapshotForge{
+			files:   map[string]RemoteFile{"README.md": {BlobID: "readme"}},
+			blobErr: fallbackErr,
+		},
+		err: nativeErr,
+	}
+	_, err := Snapshot(context.Background(), remote, RepositoryRef{Name: "demo"}, "revision")
+	if !errors.Is(err, nativeErr) || !errors.Is(err, fallbackErr) {
+		t.Fatalf("Snapshot error = %v, want both native and fallback failures", err)
 	}
 }
 

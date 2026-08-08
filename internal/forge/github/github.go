@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -23,10 +24,29 @@ type githubForge struct {
 }
 
 var (
-	_ forge.Forge             = (*githubForge)(nil)
-	_ forge.ForgeSnapshotter  = (*githubForge)(nil)
-	_ forge.ForgeCommitWriter = (*githubForge)(nil)
+	_ forge.Forge                 = (*githubForge)(nil)
+	_ forge.ForgeSnapshotter      = (*githubForge)(nil)
+	_ forge.ForgeCommitWriter     = (*githubForge)(nil)
+	_ forge.ForgeReleasePublisher = (*githubForge)(nil)
 )
+
+type githubRelease struct {
+	ID              int64  `json:"id"`
+	TagName         string `json:"tag_name"`
+	TargetCommitish string `json:"target_commitish"`
+	Name            string `json:"name"`
+	Body            string `json:"body"`
+	HTMLURL         string `json:"html_url"`
+	Draft           bool   `json:"draft"`
+	Prerelease      bool   `json:"prerelease"`
+}
+
+type githubReleaseAsset struct {
+	ID                 int64  `json:"id"`
+	Name               string `json:"name"`
+	Size               int64  `json:"size"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
 
 type githubRepository struct {
 	ID            int64   `json:"id"`
@@ -107,7 +127,11 @@ func New(p forge.Config) (*githubForge, error) {
 	headers.Set("Accept", "application/vnd.github+json")
 	headers.Set("X-GitHub-Api-Version", githubAPIVersion)
 	auth := func(request *http.Request) { request.Header.Set("Authorization", "Bearer "+p.Token) }
-	return &githubForge{server: server, apiBase: apiBase, requester: forge.NewHTTPRequester(p, apiBase, auth, headers)}, nil
+	requester, err := forge.NewHTTPRequester(p, apiBase, auth, headers)
+	if err != nil {
+		return nil, err
+	}
+	return &githubForge{server: server, apiBase: apiBase, requester: requester}, nil
 }
 
 func githubAPIBase(server string) (string, error) {
@@ -410,6 +434,79 @@ func (g *githubForge) ApplyCommit(ctx context.Context, request forge.ApplyCommit
 		}
 	}
 	return forge.ApplyCommitResult{CommitID: created.SHA, ParentIDs: []string{request.ExpectedHead}, ConditionalRef: true}, nil
+}
+
+func (g *githubForge) FindReleaseByTag(ctx context.Context, ref forge.RepositoryRef, tag string) (forge.RemoteRelease, error) {
+	var response githubRelease
+	endpoint := githubRepoAPIPath(ref) + "/releases/tags/" + url.PathEscape(tag)
+	if err := g.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return forge.RemoteRelease{}, err
+	}
+	return remoteGitHubRelease(response), nil
+}
+
+func (g *githubForge) CreateRelease(ctx context.Context, request forge.CreateReleaseRequest) (forge.RemoteRelease, error) {
+	makeLatest := "false"
+	if request.Latest {
+		makeLatest = "true"
+	}
+	payload := struct {
+		TagName         string `json:"tag_name"`
+		TargetCommitish string `json:"target_commitish"`
+		Name            string `json:"name"`
+		Body            string `json:"body"`
+		Draft           bool   `json:"draft"`
+		Prerelease      bool   `json:"prerelease"`
+		MakeLatest      string `json:"make_latest"`
+	}{request.TagName, request.TargetCommit, request.Title, request.Notes, request.Draft, request.Prerelease, makeLatest}
+	var response githubRelease
+	if err := g.requester.DoJSON(ctx, http.MethodPost, githubRepoAPIPath(request.Repository)+"/releases", payload, &response); err != nil {
+		return forge.RemoteRelease{}, err
+	}
+	return remoteGitHubRelease(response), nil
+}
+
+func (g *githubForge) ListReleaseAssets(ctx context.Context, ref forge.RepositoryRef, releaseID string) ([]forge.RemoteReleaseAsset, error) {
+	var response []githubReleaseAsset
+	endpoint := githubRepoAPIPath(ref) + "/releases/" + url.PathEscape(releaseID) + "/assets?per_page=100"
+	if err := g.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return nil, err
+	}
+	assets := make([]forge.RemoteReleaseAsset, 0, len(response))
+	for _, asset := range response {
+		assets = append(assets, remoteGitHubAsset(asset))
+	}
+	return assets, nil
+}
+
+func (g *githubForge) UploadReleaseAsset(ctx context.Context, ref forge.RepositoryRef, releaseID, name string, size int64, content io.Reader) (forge.RemoteReleaseAsset, error) {
+	endpoint := g.uploadBase() + githubRepoAPIPath(ref) + "/releases/" + url.PathEscape(releaseID) + "/assets?name=" + url.QueryEscape(name)
+	var response githubReleaseAsset
+	if err := g.requester.DoBody(ctx, http.MethodPost, endpoint, "application/octet-stream", size, content, &response); err != nil {
+		return forge.RemoteReleaseAsset{}, err
+	}
+	return remoteGitHubAsset(response), nil
+}
+
+func (g *githubForge) DownloadReleaseAsset(ctx context.Context, ref forge.RepositoryRef, asset forge.RemoteReleaseAsset) (io.ReadCloser, error) {
+	endpoint := githubRepoAPIPath(ref) + "/releases/assets/" + url.PathEscape(asset.ID)
+	return g.requester.DownloadReader(ctx, endpoint, "application/octet-stream")
+}
+
+func (g *githubForge) uploadBase() string {
+	parsed, _ := url.Parse(g.server)
+	if strings.EqualFold(parsed.Hostname(), "github.com") {
+		return "https://uploads.github.com"
+	}
+	return g.apiBase
+}
+
+func remoteGitHubRelease(release githubRelease) forge.RemoteRelease {
+	return forge.RemoteRelease{ID: strconv.FormatInt(release.ID, 10), TagName: release.TagName, TargetCommit: release.TargetCommitish, Title: release.Name, Notes: release.Body, URL: release.HTMLURL, Draft: release.Draft, Prerelease: release.Prerelease}
+}
+
+func remoteGitHubAsset(asset githubReleaseAsset) forge.RemoteReleaseAsset {
+	return forge.RemoteReleaseAsset{ID: strconv.FormatInt(asset.ID, 10), Name: asset.Name, Size: asset.Size, URL: asset.BrowserDownloadURL}
 }
 
 func (g *githubForge) gitCommit(ctx context.Context, ref forge.RepositoryRef, commit string) (githubGitCommit, error) {

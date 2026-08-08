@@ -45,12 +45,14 @@ const (
 
 // Config contains the provider settings shared by the CLI and forge adapters.
 type Config struct {
-	Provider ForgeKind `json:"provider,omitempty"`
-	URL      string    `json:"url"`
-	Token    string    `json:"token"`
-	AuthKind AuthKind  `json:"auth_kind,omitempty"`
-	Username string    `json:"username,omitempty"`
-	Insecure bool      `json:"insecure,omitempty"`
+	Provider       ForgeKind `json:"provider,omitempty"`
+	URL            string    `json:"url"`
+	Token          string    `json:"token"`
+	AuthKind       AuthKind  `json:"auth_kind,omitempty"`
+	Username       string    `json:"username,omitempty"`
+	Insecure       bool      `json:"insecure,omitempty"`
+	RequestTimeout string    `json:"request_timeout,omitempty"`
+	HTTP1Only      bool      `json:"-"`
 }
 
 type RepositoryRef struct {
@@ -156,9 +158,10 @@ type ForgeCommitWriter interface {
 }
 
 var (
-	ErrNotFound    = errors.New("remote resource not found")
-	ErrStaleHead   = errors.New("remote branch head changed")
-	ErrUnsupported = errors.New("provider capability is not supported")
+	ErrNotFound        = errors.New("remote resource not found")
+	ErrStaleHead       = errors.New("remote branch head changed")
+	ErrUnsupported     = errors.New("provider capability is not supported")
+	ErrRequestTooLarge = errors.New("remote request is too large")
 )
 
 type RemoteError struct {
@@ -180,6 +183,9 @@ func (e *RemoteError) Error() string {
 func (e *RemoteError) Unwrap() error {
 	if e.Status == 404 {
 		return ErrNotFound
+	}
+	if e.Status == 413 {
+		return ErrRequestTooLarge
 	}
 	return nil
 }

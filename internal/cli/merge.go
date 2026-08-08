@@ -130,24 +130,27 @@ func (a app) mergeRemote(ctx context.Context, root string, state workspaceState,
 	defer os.RemoveAll(resultDirectory)
 
 	if state.BaseCommit != "" {
-		baseArchive, err := forgeSnapshot(ctx, remote, state.Remote, state.BaseCommit)
+		baseSnapshot, err := forgeSnapshot(ctx, remote, state.Remote, state.BaseCommit)
 		if err != nil {
 			return fmt.Errorf("download merge base %.12s: %w", state.BaseCommit, err)
 		}
-		if err := extractArchive(baseArchive, baseDirectory); err != nil {
+		if err := extractArchive(baseSnapshot.Archive, baseDirectory); err != nil {
 			return err
 		}
 	}
-	theirsArchive, err := forgeSnapshot(ctx, remote, state.Remote, remoteCommit)
+	theirsSnapshot, err := forgeSnapshot(ctx, remote, state.Remote, remoteCommit)
 	if err != nil {
 		return err
 	}
-	if err := extractArchive(theirsArchive, theirsDirectory); err != nil {
+	if err := extractArchive(theirsSnapshot.Archive, theirsDirectory); err != nil {
 		return err
 	}
-	remoteTree, err := remote.Tree(ctx, state.Remote, remoteCommit)
-	if err != nil {
-		return err
+	remoteTree := theirsSnapshot.Files
+	if remoteTree == nil {
+		remoteTree, err = remote.Tree(ctx, state.Remote, remoteCommit)
+		if err != nil {
+			return err
+		}
 	}
 	oursFiles, err := scanWorkspace(root)
 	if err != nil {

@@ -447,6 +447,43 @@ func (a app) gitCommit(root string, state workspaceState, message, authorName, a
 	return nil
 }
 
+func (a app) gitUncommit(root string, state workspaceState) error {
+	repository, worktree, err := openGitWorkspace(root, state)
+	if err != nil {
+		return err
+	}
+	prepared, err := loadPreparedGitExport(root)
+	if err != nil {
+		return err
+	}
+	if prepared != nil {
+		return errors.New("cannot uncommit while a remote export is prepared")
+	}
+	pending, err := pendingGitCommits(repository, state.Hybrid.TrackingRef)
+	if err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		return errors.New("no unpushed commit to uncommit")
+	}
+	headFiles, indexFiles, _, err := gitSnapshots(repository, worktree)
+	if err != nil {
+		return err
+	}
+	if len(byteSnapshotChanges(headFiles, indexFiles)) != 0 {
+		return errors.New("cannot uncommit while other changes are staged; reset them first")
+	}
+	commit := pending[len(pending)-1]
+	if len(commit.ParentHashes) != 1 {
+		return errors.New("cannot uncommit an initial or merge commit in a hybrid workspace")
+	}
+	if err := worktree.Reset(&git.ResetOptions{Commit: commit.ParentHashes[0], Mode: git.SoftReset}); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Uncommitted %.12s; restored its changes to the Git index.\n", commit.Hash)
+	return nil
+}
+
 func (a app) gitLog(root string, state workspaceState, oneline bool) error {
 	repository, _, err := openGitWorkspace(root, state)
 	if err != nil {
@@ -564,20 +601,23 @@ func (a app) gitDiff(root string, state workspaceState, staged bool) error {
 }
 
 func remoteByteSnapshot(ctx context.Context, remote Forge, ref RepositoryRef, commit string) (map[string][]byte, map[string]RemoteFile, error) {
-	files, err := remote.Tree(ctx, ref, commit)
+	snapshot, err := forgeSnapshot(ctx, remote, ref, commit)
 	if err != nil {
 		return nil, nil, err
 	}
-	archive, err := forgeSnapshot(ctx, remote, ref, commit)
-	if err != nil {
-		return nil, nil, err
+	files := snapshot.Files
+	if files == nil {
+		files, err = remote.Tree(ctx, ref, commit)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	directory, err := os.MkdirTemp("", "gew-remote-snapshot-")
 	if err != nil {
 		return nil, nil, err
 	}
 	defer os.RemoveAll(directory)
-	if err := extractArchive(archive, directory); err != nil {
+	if err := extractArchive(snapshot.Archive, directory); err != nil {
 		return nil, nil, err
 	}
 	result, err := gitWorktreeSnapshot(directory)
@@ -1037,23 +1077,26 @@ func saveGitExportReceipt(root string, receipt gitExportReceipt) error {
 }
 
 func verifyRemoteTree(ctx context.Context, remote Forge, ref RepositoryRef, commit string, expected map[string][]byte) error {
-	files, err := remote.Tree(ctx, ref, commit)
+	snapshot, err := forgeSnapshot(ctx, remote, ref, commit)
 	if err != nil {
 		return err
+	}
+	files := snapshot.Files
+	if files == nil {
+		files, err = remote.Tree(ctx, ref, commit)
+		if err != nil {
+			return err
+		}
 	}
 	if len(files) != len(expected) {
 		return fmt.Errorf("provider commit %s tree has %d files, expected %d", commit, len(files), len(expected))
-	}
-	archive, err := forgeSnapshot(ctx, remote, ref, commit)
-	if err != nil {
-		return err
 	}
 	directory, err := os.MkdirTemp("", "gew-verify-snapshot-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(directory)
-	if err := extractArchive(archive, directory); err != nil {
+	if err := extractArchive(snapshot.Archive, directory); err != nil {
 		return err
 	}
 	actual, err := gitWorktreeSnapshot(directory)
@@ -1212,6 +1255,26 @@ func (a app) gitPushWithForge(ctx context.Context, root string, state workspaceS
 		}
 		result, err := writer.ApplyCommit(ctx, request)
 		if err != nil {
+			observedHead, headErr := remote.Head(ctx, state.Remote, targetBranch)
+			if headErr == nil && observedHead != remoteHead {
+				reconciled, reconcileErr := reconcilePreparedGitExport(ctx, root, &state, repository, remote, writer, observedHead, &prepared)
+				if reconcileErr != nil {
+					return errors.Join(err, fmt.Errorf("reconcile ambiguous export: %w", reconcileErr))
+				}
+				if reconciled {
+					remoteHead = observedHead
+					oldTracking = commit.Hash
+					remoteFiles, err = remote.Tree(ctx, state.Remote, remoteHead)
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(a.out, "Reconciled local %.12s as remote %.12s after an ambiguous export.\n", commit.Hash, observedHead)
+					continue
+				}
+			}
+			if headErr != nil {
+				return errors.Join(err, fmt.Errorf("ambiguous export could not refresh branch state: %w", headErr))
+			}
 			return fmt.Errorf("export of local commit %.12s remains prepared for reconciliation: %w", commit.Hash, err)
 		}
 		confirmedHead, err := remote.Head(ctx, state.Remote, targetBranch)

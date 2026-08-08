@@ -18,15 +18,15 @@ workspace engine. GitLab and Bitbucket push are intentionally disabled until
 their concurrency behavior passes live safety verification.
 
 `gew` is not a complete Git replacement. It focuses on everyday file changes,
-local commits, safe synchronization, and recoverable merges—not tags, rebase,
-cherry-pick, submodules, or arbitrary history operations.
+local commits, safe synchronization, recoverable merges, and hosted release
+publication—not rebase, cherry-pick, submodules, or arbitrary history operations.
 
 ## Quick start
 
 ```sh
 # Configure credentials once.
 export GEW_TOKEN=your-token
-gew login --provider gitea https://gitea.example.com
+gew login --provider gitea --request-timeout 5m https://gitea.example.com
 unset GEW_TOKEN
 
 # Work with a repository without Git transport.
@@ -46,6 +46,18 @@ gew push
 Staged content is snapshotted when you run `gew add`, so later edits do not
 silently change the queued commit. Multiple local commits are pushed in order,
 one remote commit at a time.
+
+To publish the synchronized commit as a GitHub or Gitea hosted release:
+
+```sh
+gew release create v0.6.0 --title "gew v0.6.0" \
+  --notes-file release/v0.6.0/RELEASE_NOTES.md \
+  --asset /path/to/gew_0.6.0_linux_amd64.tar.gz \
+  --asset /path/to/SHA256SUMS
+```
+
+Use `--resume` only to continue a release whose tag target, metadata, and
+existing asset bytes match exactly.
 
 ## Install or build
 
@@ -90,6 +102,9 @@ Authentication notes:
 
 For ephemeral use, skip `login` and set `GEW_SERVER`, `GEW_TOKEN`, and, when
 needed, `GEW_PROVIDER`, `GEW_AUTH_KIND`, and `GEW_USERNAME`.
+Set `GEW_HTTP_TIMEOUT` to a Go duration from `1s` through `30m` to override the
+saved per-request timeout; the default is `90s`. Gew may retry transient GET or
+HEAD requests, but it never replays a mutating request automatically.
 
 Confirm the selected profile before cloning:
 
@@ -116,6 +131,7 @@ Useful variations:
 gew add -A                         # Stage all changes, including deletions
 gew reset src/config.go            # Unstage one path
 gew reset                          # Unstage everything
+gew uncommit                       # Restore the newest unpushed commit to the index
 gew pull --ff-only                 # Refuse local merges
 gew push --new-branch feature/api  # Create and switch to a remote branch
 ```
@@ -151,10 +167,12 @@ and `.theirs` suffixes.
 | Stage | `gew add PATH...`, `gew add -A` |
 | Unstage | `gew reset [PATH...]` |
 | Commit | `gew commit -m MESSAGE` |
+| Undo newest unpushed commit | `gew uncommit` |
 | View local history | `gew log --oneline` |
 | Pull | `gew pull`, `gew pull --ff-only` |
 | Resolve a merge | `gew merge --continue`, `gew merge --abort` |
 | Push | `gew push`, `gew push --new-branch BRANCH` |
+| Publish a hosted release | `gew release create TAG --title TITLE --notes-file PATH --asset PATH...` |
 | Migrate to the local `.git` backend | `gew migrate --to git --dry-run`, then `gew migrate --to git` |
 
 Generated help is available for the whole command tree and for each command:
@@ -229,9 +247,12 @@ migration and implicit adoption of an existing Git repository are unsupported.
   commit. Partial queues checkpoint after each confirmed commit.
 - Accepted-but-lost responses are reconciled before retrying, preventing
   duplicate remote commits.
+- Release creation and asset upload reconcile remote state before any replay;
+  resume verifies exact metadata and downloaded asset SHA-256 values.
 - Pull refuses staged changes. Unstaged work is merged only when it can be
   recovered or explicitly resolved.
-- Archive extraction rejects path traversal and symbolic links. Staging rejects
+- Failed native archive downloads fall back to bounded Tree+Blob snapshots.
+  Archive extraction rejects path traversal and symbolic links. Staging rejects
   paths outside the workspace and internal `.gew` or `.git` files.
 - Tokens are never stored in a workspace.
 
@@ -241,18 +262,18 @@ an empty GitHub repository elsewhere, then run `gew pull` before pushing.
 
 ## Provider status
 
-| Provider | Clone/pull strategy | Push safety |
-| --- | --- | --- |
-| Gitea | Native exact-revision archive and recursive tree | Atomic multi-file endpoint; enabled |
-| GitHub | Native archive and Git tree API | Non-force conditional ref update; enabled for non-empty repos |
-| GitLab | Native archive and paginated tree | Disabled pending live branch-wide concurrency proof |
-| Bitbucket Cloud | Exact-commit tree and shared ZIP fallback | Disabled pending live stale-parent/lost-response proof |
-| Azure DevOps | Exact-commit item listing and shared ZIP fallback | Exact `oldObjectId` ref update; enabled |
+| Provider | Clone/pull strategy | Push safety | Hosted releases |
+| --- | --- | --- | --- |
+| Gitea | Native exact-revision archive, then Tree+Blob fallback | Atomic multi-file endpoint; enabled | Enabled |
+| GitHub | Native archive, then Git tree/blob fallback | Non-force conditional ref update; enabled for non-empty repos | Enabled |
+| GitLab | Native archive and paginated tree | Disabled pending live branch-wide concurrency proof | Unsupported |
+| Bitbucket Cloud | Exact-commit tree and shared ZIP fallback | Disabled pending live stale-parent/lost-response proof | Unsupported |
+| Azure DevOps | Exact-commit item listing and shared ZIP fallback | Exact `oldObjectId` ref update; enabled | Unsupported |
 
 ## Current limitations
 
-- No rebase, cherry-pick, tags, submodules, LFS, worktrees, or arbitrary DAG
-  export.
+- No standalone tag management, rebase, cherry-pick, submodules, LFS,
+  worktrees, or arbitrary DAG export. `release create` creates its own tag.
 - Merges and diffs are line-oriented, with no semantic merge or rename
   detection. Renames appear as delete plus create.
 - Symlinks, submodules, executable-bit-only changes, and empty directories are

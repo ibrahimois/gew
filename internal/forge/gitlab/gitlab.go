@@ -97,7 +97,11 @@ func New(p forge.Config) (*gitLabForge, error) {
 			request.Header.Set("Authorization", "Bearer "+p.Token)
 		}
 	}
-	return &gitLabForge{server: server, apiBase: apiBase, requester: forge.NewHTTPRequester(p, apiBase, auth, make(http.Header))}, nil
+	requester, err := forge.NewHTTPRequester(p, apiBase, auth, make(http.Header))
+	if err != nil {
+		return nil, err
+	}
+	return &gitLabForge{server: server, apiBase: apiBase, requester: requester}, nil
 }
 
 func (g *gitLabForge) Kind() forge.ForgeKind { return forge.ForgeGitLab }

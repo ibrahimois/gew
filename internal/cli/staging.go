@@ -29,10 +29,13 @@ type stageIndex struct {
 }
 
 type commitChange struct {
-	Kind   string `json:"kind"`
-	Path   string `json:"path"`
-	Object string `json:"object,omitempty"`
-	Mode   uint32 `json:"mode,omitempty"`
+	Kind            string `json:"kind"`
+	Path            string `json:"path"`
+	Object          string `json:"object,omitempty"`
+	Mode            uint32 `json:"mode,omitempty"`
+	PreviousObject  string `json:"previous_object,omitempty"`
+	PreviousMode    uint32 `json:"previous_mode,omitempty"`
+	PreviousExisted bool   `json:"previous_existed,omitempty"`
 }
 
 type localCommit struct {
@@ -208,9 +211,15 @@ func (a app) commitOperation(_ context.Context, options commitOptions) error {
 	changes := make([]commitChange, 0, len(paths))
 	for _, filePath := range paths {
 		entry := index.Entries[filePath]
-		changes = append(changes, commitChange{
+		change := commitChange{
 			Kind: entry.Kind, Path: filePath, Object: entry.Object, Mode: entry.Mode,
-		})
+		}
+		if previous, exists := state.Files[filePath]; exists {
+			change.PreviousObject = previous.Hash
+			change.PreviousMode = previous.Mode
+			change.PreviousExisted = true
+		}
+		changes = append(changes, change)
 	}
 	parent := state.LocalHead
 	if parent == "" {
@@ -259,6 +268,68 @@ func (a app) commitOperation(_ context.Context, options commitOptions) error {
 	}
 	fmt.Fprintf(a.out, "[%s %.12s] %s\n", state.Branch, commit.ID, commit.Message)
 	fmt.Fprintf(a.out, " %d file change(s) committed locally.\n", len(commit.Changes))
+	return nil
+}
+
+func (a app) uncommitOperation(_ context.Context) error {
+	root, state, err := findWorkspace()
+	if err != nil {
+		return err
+	}
+	if state.Backend == WorkspaceGit {
+		return a.gitUncommit(root, state)
+	}
+	if mergeState, err := loadMergeState(root); err != nil {
+		return err
+	} else if mergeState != nil {
+		return errors.New("cannot uncommit while a merge is in progress")
+	}
+	if len(state.Queue) == 0 {
+		return errors.New("no unpushed commit to uncommit")
+	}
+	commitID := state.Queue[len(state.Queue)-1]
+	if state.LocalHead != commitID || len(state.History) == 0 || state.History[len(state.History)-1] != commitID {
+		return errors.New("newest queued commit is not the local history tip")
+	}
+	commit, err := loadLocalCommit(root, commitID)
+	if err != nil {
+		return err
+	}
+	if commit.RemoteSHA != "" || commit.PushedAt != nil {
+		return errors.New("cannot uncommit a pushed commit")
+	}
+	index, err := loadIndex(root)
+	if err != nil {
+		return err
+	}
+	if len(index.Entries) != 0 {
+		return errors.New("cannot uncommit while other changes are staged; reset them first")
+	}
+	for _, change := range commit.Changes {
+		if change.Kind != "created" && !change.PreviousExisted {
+			return fmt.Errorf("commit %.12s predates reversible commit metadata; recreate or migrate the workspace", commit.ID)
+		}
+		index.Entries[change.Path] = indexEntry{Kind: change.Kind, Object: change.Object, Mode: change.Mode}
+		if change.PreviousExisted {
+			state.Files[change.Path] = fileState{Hash: change.PreviousObject, Mode: change.PreviousMode}
+		} else {
+			delete(state.Files, change.Path)
+		}
+	}
+	state.Queue = state.Queue[:len(state.Queue)-1]
+	state.History = state.History[:len(state.History)-1]
+	state.LocalHead = ""
+	if len(state.History) > 0 {
+		state.LocalHead = state.History[len(state.History)-1]
+	}
+	if err := saveIndex(root, index); err != nil {
+		return err
+	}
+	if err := saveState(root, state); err != nil {
+		_ = saveIndex(root, stageIndex{Version: indexVersion, Entries: make(map[string]indexEntry)})
+		return err
+	}
+	fmt.Fprintf(a.out, "Uncommitted %.12s; restored %d staged file change(s).\n", commit.ID, len(commit.Changes))
 	return nil
 }
 

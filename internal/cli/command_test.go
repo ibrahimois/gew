@@ -36,7 +36,7 @@ func runOutsideWorkspace(t *testing.T) {
 }
 
 func TestCommandRootHelp(t *testing.T) {
-	commands := []string{"login", "doctor", "clone", "status", "add", "reset", "diff", "commit", "log", "pull", "merge", "migrate", "push", "version", "completion"}
+	commands := []string{"login", "doctor", "clone", "status", "add", "reset", "diff", "commit", "uncommit", "log", "pull", "merge", "migrate", "push", "release", "version", "completion"}
 	for _, args := range [][]string{nil, {"help"}, {"-h"}, {"--help"}} {
 		output, errorOutput, err := invokeCommand(context.Background(), args...)
 		if err != nil {
@@ -54,7 +54,7 @@ func TestCommandRootHelp(t *testing.T) {
 }
 
 func TestCommandHelpForEveryCommand(t *testing.T) {
-	commands := []string{"login", "doctor", "clone", "status", "add", "reset", "diff", "commit", "log", "pull", "merge", "migrate", "push", "version", "completion"}
+	commands := []string{"login", "doctor", "clone", "status", "add", "reset", "diff", "commit", "uncommit", "log", "pull", "merge", "migrate", "push", "release", "version", "completion"}
 	for _, name := range commands {
 		t.Run(name, func(t *testing.T) {
 			for _, args := range [][]string{{"help", name}, {name, "--help"}, {name, "-h"}} {
@@ -86,7 +86,7 @@ func TestCommandVersionAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunContext(%q) error = %v", args, err)
 		}
-		if output != "gew 0.5.0\n" {
+		if output != "gew 0.6.0\n" {
 			t.Errorf("RunContext(%q) output = %q", args, output)
 		}
 		if errorOutput != "" {
@@ -117,6 +117,7 @@ func TestCommandArityAndValidation(t *testing.T) {
 		{name: "migrate missing target", args: []string{"migrate"}, want: "Required flag"},
 		{name: "migrate wrong target", args: []string{"migrate", "--to", "svn"}, want: "unsupported migration target"},
 		{name: "unknown flag", args: []string{"status", "--unknown"}, want: "flag provided but not defined"},
+		{name: "invalid request timeout", args: []string{"login", "--token", "test", "--request-timeout", "500ms", "https://example.test"}, want: "request timeout must be between"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -174,7 +175,7 @@ func TestCommandCompletionAndTokenRedaction(t *testing.T) {
 		}
 	}
 	output, errorOutput, err := invokeCommand(context.Background(), "login", "--help")
-	if err != nil || !strings.Contains(output, "GEW_TOKEN") || strings.Contains(output+errorOutput, "command-test-token-must-not-leak") {
+	if err != nil || !strings.Contains(output, "GEW_TOKEN") || !strings.Contains(output, "GEW_HTTP_TIMEOUT") || strings.Contains(output+errorOutput, "command-test-token-must-not-leak") {
 		t.Fatalf("login help redaction failed: output=%q errorOutput=%q err=%v", output, errorOutput, err)
 	}
 }

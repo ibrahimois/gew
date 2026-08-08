@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -46,11 +47,7 @@ func TestGiteaApplyCommitUsesAtomicContentsEndpoint(t *testing.T) {
 			if payload.Files[1].Operation != "update" || payload.Files[1].SHA != "old-blob" || payload.Files[2].Operation != "delete" || payload.Files[2].SHA != "gone-blob" {
 				t.Fatalf("update/delete = %#v", payload.Files)
 			}
-			json.NewEncoder(response).Encode(map[string]any{"ok": true})
-		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/branches/feature"):
-			json.NewEncoder(response).Encode(map[string]any{"name": "feature", "commit": map[string]string{"id": "next"}})
-		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/git/commits/next"):
-			json.NewEncoder(response).Encode(map[string]any{"sha": "next", "parents": []map[string]string{{"sha": "base"}}})
+			json.NewEncoder(response).Encode(map[string]any{"commit": map[string]any{"sha": "next", "message": "message", "parents": []map[string]string{{"sha": "base"}}}})
 		default:
 			http.NotFound(response, request)
 		}
@@ -71,7 +68,7 @@ func TestGiteaApplyCommitUsesAtomicContentsEndpoint(t *testing.T) {
 	if result.CommitID != "next" || !reflect.DeepEqual(result.ParentIDs, []string{"base"}) || result.ConditionalRef {
 		t.Fatalf("result = %#v", result)
 	}
-	want := []string{"POST /api/v1/repos/acme/demo/contents", "GET /api/v1/repos/acme/demo/branches/feature", "GET /api/v1/repos/acme/demo/git/commits/next"}
+	want := []string{"POST /api/v1/repos/acme/demo/contents"}
 	if !reflect.DeepEqual(requests, want) {
 		t.Fatalf("requests = %#v, want %#v", requests, want)
 	}
@@ -158,5 +155,71 @@ func TestGiteaCapabilities(t *testing.T) {
 	capabilities := forge.Capabilities()
 	if !capabilities.BranchCreate || !capabilities.Push {
 		t.Fatalf("capabilities = %#v", capabilities)
+	}
+}
+
+func TestGiteaReleasePublisher(t *testing.T) {
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/tags/v1.2.3"):
+			json.NewEncoder(response).Encode(giteaRelease{ID: 7, TagName: "v1.2.3", TargetCommitish: "exact", Name: "title", Body: "notes"})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/releases"):
+			var payload map[string]any
+			json.NewDecoder(request.Body).Decode(&payload)
+			if payload["target_commitish"] != "exact" || payload["tag_name"] != "v1.2.3" {
+				t.Fatalf("release payload = %#v", payload)
+			}
+			json.NewEncoder(response).Encode(giteaRelease{ID: 7, TagName: "v1.2.3", TargetCommitish: "exact", Name: "title", Body: "notes"})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
+			json.NewEncoder(response).Encode([]giteaReleaseAsset{{ID: 9, Name: "gew.tar.gz", Size: 4}})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
+			if request.URL.Query().Get("name") != "gew.tar.gz" {
+				t.Fatalf("asset query = %q", request.URL.RawQuery)
+			}
+			file, header, err := request.FormFile("attachment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			uploaded, _ = io.ReadAll(file)
+			if header.Filename != "gew.tar.gz" {
+				t.Fatalf("filename = %q", header.Filename)
+			}
+			json.NewEncoder(response).Encode(giteaReleaseAsset{ID: 9, Name: "gew.tar.gz", Size: 4})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/assets/9"):
+			response.Write([]byte("data"))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	remote, _ := New(forgecore.Config{URL: server.URL, Token: "secret", AuthKind: forgecore.AuthToken})
+	ref := forgecore.RepositoryRef{Namespace: "acme", Name: "demo"}
+	release, err := remote.FindReleaseByTag(context.Background(), ref, "v1.2.3")
+	if err != nil || release.ID != "7" || release.TargetCommit != "exact" {
+		t.Fatalf("find release = %#v, %v", release, err)
+	}
+	release, err = remote.CreateRelease(context.Background(), forgecore.CreateReleaseRequest{Repository: ref, TagName: "v1.2.3", TargetCommit: "exact", Title: "title", Notes: "notes", Latest: true})
+	if err != nil || release.ID != "7" {
+		t.Fatalf("create release = %#v, %v", release, err)
+	}
+	assets, err := remote.ListReleaseAssets(context.Background(), ref, release.ID)
+	if err != nil || len(assets) != 1 || assets[0].ID != "9" {
+		t.Fatalf("assets = %#v, %v", assets, err)
+	}
+	asset, err := remote.UploadReleaseAsset(context.Background(), ref, release.ID, "gew.tar.gz", 4, strings.NewReader("data"))
+	if err != nil || asset.ID != "9" || string(uploaded) != "data" {
+		t.Fatalf("upload = %#v, %q, %v", asset, uploaded, err)
+	}
+	reader, err := remote.DownloadReleaseAsset(context.Background(), ref, asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(reader)
+	reader.Close()
+	if string(data) != "data" {
+		t.Fatalf("download = %q", data)
 	}
 }

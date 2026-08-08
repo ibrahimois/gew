@@ -23,17 +23,18 @@ func runTestCommand(a app, name string, args ...string) error {
 	return RunContext(context.Background(), append([]string{name}, args...), a.out, a.errOut)
 }
 
-func (a app) clone(args []string) error   { return runTestCommand(a, "clone", args...) }
-func (a app) status(args []string) error  { return runTestCommand(a, "status", args...) }
-func (a app) add(args []string) error     { return runTestCommand(a, "add", args...) }
-func (a app) reset(args []string) error   { return runTestCommand(a, "reset", args...) }
-func (a app) diff(args []string) error    { return runTestCommand(a, "diff", args...) }
-func (a app) commit(args []string) error  { return runTestCommand(a, "commit", args...) }
-func (a app) log(args []string) error     { return runTestCommand(a, "log", args...) }
-func (a app) pull(args []string) error    { return runTestCommand(a, "pull", args...) }
-func (a app) merge(args []string) error   { return runTestCommand(a, "merge", args...) }
-func (a app) migrate(args []string) error { return runTestCommand(a, "migrate", args...) }
-func (a app) push(args []string) error    { return runTestCommand(a, "push", args...) }
+func (a app) clone(args []string) error    { return runTestCommand(a, "clone", args...) }
+func (a app) status(args []string) error   { return runTestCommand(a, "status", args...) }
+func (a app) add(args []string) error      { return runTestCommand(a, "add", args...) }
+func (a app) reset(args []string) error    { return runTestCommand(a, "reset", args...) }
+func (a app) diff(args []string) error     { return runTestCommand(a, "diff", args...) }
+func (a app) commit(args []string) error   { return runTestCommand(a, "commit", args...) }
+func (a app) uncommit(args []string) error { return runTestCommand(a, "uncommit", args...) }
+func (a app) log(args []string) error      { return runTestCommand(a, "log", args...) }
+func (a app) pull(args []string) error     { return runTestCommand(a, "pull", args...) }
+func (a app) merge(args []string) error    { return runTestCommand(a, "merge", args...) }
+func (a app) migrate(args []string) error  { return runTestCommand(a, "migrate", args...) }
+func (a app) push(args []string) error     { return runTestCommand(a, "push", args...) }
 
 type fakeGitea struct {
 	mu              sync.Mutex
@@ -214,7 +215,11 @@ func (f *fakeGitea) ServeHTTP(response http.ResponseWriter, request *http.Reques
 			return
 		}
 		response.WriteHeader(http.StatusCreated)
-		json.NewEncoder(response).Encode(map[string]any{"commit": map[string]string{"sha": f.commitSHA()}})
+		parents := []map[string]string{}
+		if parent != "" {
+			parents = append(parents, map[string]string{"sha": parent})
+		}
+		json.NewEncoder(response).Encode(map[string]any{"commit": map[string]any{"sha": f.commitSHA(), "message": payload.Message, "parents": parents}})
 	default:
 		http.NotFound(response, request)
 	}
@@ -705,31 +710,69 @@ func TestAmbiguousSuccessfulPushReconcilesOnRetry(t *testing.T) {
 	fake.mu.Lock()
 	fake.resetAfterApply = true
 	fake.mu.Unlock()
-	if err := a.push(nil); err == nil {
-		t.Fatal("expected connection failure after remote applied commit")
+	if err := a.push(nil); err != nil {
+		t.Fatalf("ambiguous push did not reconcile in the same invocation: %v", err)
 	}
 	_, state, err := findWorkspace()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Queue) != 1 {
-		t.Fatalf("ambiguous push should remain queued: %#v", state.Queue)
-	}
-	output.Reset()
-	if err := a.push(nil); err != nil {
-		t.Fatalf("reconcile retry: %v", err)
+	if len(state.Queue) != 0 {
+		t.Fatalf("same-invocation reconciliation left queue entries: %#v", state.Queue)
 	}
 	if !strings.Contains(output.String(), "Reconciled already-applied commit") {
-		t.Fatalf("retry did not report reconciliation:\n%s", output.String())
-	}
-	_, state, _ = findWorkspace()
-	if len(state.Queue) != 0 {
-		t.Fatalf("reconciled queue not empty: %#v", state.Queue)
+		t.Fatalf("push did not report reconciliation:\n%s", output.String())
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if len(fake.messages) != 1 {
 		t.Fatalf("retry duplicated remote commit: %#v", fake.messages)
+	}
+}
+
+func TestUncommitRestoresExactStagedSnapshot(t *testing.T) {
+	fake := newFakeGitea()
+	a, checkout, _ := clonedTestWorkspace(t, fake)
+	if err := os.WriteFile(filepath.Join(checkout, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "new.bin"), []byte{0, 1, 2, 3}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(checkout, "config", "app.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.add([]string{"-A"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.commit([]string{"-m", "large release payload"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.uncommit(nil); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := findWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Queue) != 0 || len(state.History) != 0 || state.LocalHead != "" {
+		t.Fatalf("state after uncommit = %#v", state)
+	}
+	if state.Files["README.md"].Hash == "" || state.Files["config/app.json"].Hash == "" {
+		t.Fatalf("base file metadata was not restored: %#v", state.Files)
+	}
+	if _, exists := state.Files["new.bin"]; exists {
+		t.Fatal("created file became part of restored base")
+	}
+	index, err := loadIndex(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(index.Entries) != 3 || index.Entries["README.md"].Kind != "modified" || index.Entries["new.bin"].Kind != "created" || index.Entries["config/app.json"].Kind != "deleted" {
+		t.Fatalf("restored index = %#v", index)
+	}
+	if content, err := os.ReadFile(filepath.Join(checkout, "README.md")); err != nil || string(content) != "changed\n" {
+		t.Fatalf("working tree changed: %q, %v", content, err)
 	}
 }
 

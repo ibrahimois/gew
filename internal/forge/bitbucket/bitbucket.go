@@ -112,7 +112,11 @@ func newBitbucketForgeWithAPI(p forge.Config, apiBase string) (*bitbucketForge, 
 	if server == "" || strings.Contains(server, "127.0.0.1") {
 		server = "https://bitbucket.org"
 	}
-	return &bitbucketForge{server: strings.TrimRight(server, "/"), apiBase: strings.TrimRight(apiBase, "/"), requester: forge.NewHTTPRequester(p, apiBase, auth, make(http.Header))}, nil
+	requester, err := forge.NewHTTPRequester(p, apiBase, auth, make(http.Header))
+	if err != nil {
+		return nil, err
+	}
+	return &bitbucketForge{server: strings.TrimRight(server, "/"), apiBase: strings.TrimRight(apiBase, "/"), requester: requester}, nil
 }
 
 func (b *bitbucketForge) Kind() forge.ForgeKind { return forge.ForgeBitbucket }

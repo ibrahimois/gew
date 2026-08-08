@@ -215,6 +215,71 @@ func TestGitHubRefConflictRequiresConfirmedHeadChange(t *testing.T) {
 	}
 }
 
+func TestGitHubReleasePublisher(t *testing.T) {
+	var latest string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/tags/v1.2.3"):
+			json.NewEncoder(response).Encode(githubRelease{ID: 7, TagName: "v1.2.3", TargetCommitish: "exact", Name: "title", Body: "notes"})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/releases"):
+			var payload map[string]any
+			json.NewDecoder(request.Body).Decode(&payload)
+			latest, _ = payload["make_latest"].(string)
+			if payload["target_commitish"] != "exact" {
+				t.Fatalf("release payload = %#v", payload)
+			}
+			json.NewEncoder(response).Encode(githubRelease{ID: 7, TagName: "v1.2.3", TargetCommitish: "exact", Name: "title", Body: "notes"})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
+			json.NewEncoder(response).Encode([]githubReleaseAsset{{ID: 9, Name: "gew.tar.gz", Size: 4}})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/releases/7/assets"):
+			if request.Header.Get("Content-Type") != "application/octet-stream" || request.ContentLength != 4 {
+				t.Fatalf("upload headers = %#v length=%d", request.Header, request.ContentLength)
+			}
+			data, _ := io.ReadAll(request.Body)
+			if string(data) != "data" || request.URL.Query().Get("name") != "gew.tar.gz" {
+				t.Fatalf("upload = %q query=%q", data, request.URL.RawQuery)
+			}
+			json.NewEncoder(response).Encode(githubReleaseAsset{ID: 9, Name: "gew.tar.gz", Size: 4})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/releases/assets/9"):
+			if request.Header.Get("Accept") != "application/octet-stream" {
+				t.Fatalf("download accept = %q", request.Header.Get("Accept"))
+			}
+			response.Write([]byte("data"))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	remote, _ := New(forgecore.Config{URL: server.URL, Token: "secret", AuthKind: forgecore.AuthBearer})
+	ref := forgecore.RepositoryRef{Namespace: "acme", Name: "demo"}
+	release, err := remote.FindReleaseByTag(context.Background(), ref, "v1.2.3")
+	if err != nil || release.ID != "7" {
+		t.Fatalf("find = %#v, %v", release, err)
+	}
+	release, err = remote.CreateRelease(context.Background(), forgecore.CreateReleaseRequest{Repository: ref, TagName: "v1.2.3", TargetCommit: "exact", Title: "title", Notes: "notes", Latest: true})
+	if err != nil || latest != "true" {
+		t.Fatalf("create = %#v latest=%q err=%v", release, latest, err)
+	}
+	assets, err := remote.ListReleaseAssets(context.Background(), ref, release.ID)
+	if err != nil || len(assets) != 1 {
+		t.Fatalf("assets = %#v, %v", assets, err)
+	}
+	asset, err := remote.UploadReleaseAsset(context.Background(), ref, release.ID, "gew.tar.gz", 4, strings.NewReader("data"))
+	if err != nil || asset.ID != "9" {
+		t.Fatalf("upload = %#v, %v", asset, err)
+	}
+	reader, err := remote.DownloadReleaseAsset(context.Background(), ref, asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(reader)
+	reader.Close()
+	if string(data) != "data" {
+		t.Fatalf("download = %q", data)
+	}
+}
+
 func TestGitHubBlobValidationFailureIsNeverStale(t *testing.T) {
 	headReads := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

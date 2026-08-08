@@ -14,18 +14,50 @@ import (
 
 const maxRemoteSnapshot = MaxRemoteSnapshot
 
-func Snapshot(ctx context.Context, remote Forge, ref RepositoryRef, revision string) ([]byte, error) {
-	if snapshotter, ok := remote.(ForgeSnapshotter); ok {
-		return snapshotter.Snapshot(ctx, ref, revision)
-	}
-	return readerSnapshot(ctx, remote, ref, revision)
+type SnapshotResult struct {
+	Archive []byte
+	Files   map[string]RemoteFile
 }
 
-func readerSnapshot(ctx context.Context, remote RepositoryReader, ref RepositoryRef, revision string) ([]byte, error) {
+func Snapshot(ctx context.Context, remote Forge, ref RepositoryRef, revision string) ([]byte, error) {
+	result, err := SnapshotWithTree(ctx, remote, ref, revision)
+	return result.Archive, err
+}
+
+// SnapshotWithTree returns the tree used to construct a fallback archive. A
+// nil Files map means the provider-native archive fast path succeeded.
+func SnapshotWithTree(ctx context.Context, remote Forge, ref RepositoryRef, revision string) (SnapshotResult, error) {
+	if snapshotter, ok := remote.(ForgeSnapshotter); ok {
+		archive, nativeErr := snapshotter.Snapshot(ctx, ref, revision)
+		if nativeErr == nil {
+			return SnapshotResult{Archive: archive}, nil
+		}
+		if ctx.Err() != nil {
+			return SnapshotResult{}, errors.Join(fmt.Errorf("native snapshot: %w", nativeErr), ctx.Err())
+		}
+		archive, files, fallbackErr := readerSnapshot(ctx, remote, ref, revision)
+		if fallbackErr != nil {
+			return SnapshotResult{}, errors.Join(
+				fmt.Errorf("native snapshot: %w", nativeErr),
+				fmt.Errorf("tree/blob snapshot: %w", fallbackErr),
+			)
+		}
+		return SnapshotResult{Archive: archive, Files: files}, nil
+	}
+	archive, files, err := readerSnapshot(ctx, remote, ref, revision)
+	return SnapshotResult{Archive: archive, Files: files}, err
+}
+
+func readerSnapshot(ctx context.Context, remote RepositoryReader, ref RepositoryRef, revision string) ([]byte, map[string]RemoteFile, error) {
 	files, err := remote.Tree(ctx, ref, revision)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	archive, err := readerSnapshotFromTree(ctx, remote, ref, revision, files)
+	return archive, files, err
+}
+
+func readerSnapshotFromTree(ctx context.Context, remote RepositoryReader, ref RepositoryRef, revision string, files map[string]RemoteFile) ([]byte, error) {
 	paths := make([]string, 0, len(files))
 	var declaredSize int64
 	for filePath, file := range files {

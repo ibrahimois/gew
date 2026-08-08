@@ -13,8 +13,8 @@ import (
 )
 
 type loginOptions struct {
-	Name, Provider, Token, AuthKind, Username, URL string
-	Insecure                                       bool
+	Name, Provider, Token, AuthKind, Username, URL, RequestTimeout string
+	Insecure                                                       bool
 }
 
 type cloneOptions struct {
@@ -39,6 +39,13 @@ type mergeOptions struct {
 type migrateOptions struct {
 	Target, AuthorName, AuthorEmail string
 	DryRun                          bool
+}
+
+type releaseCreateOptions struct {
+	Tag, Title, NotesFile string
+	Assets                []string
+	Draft, Prerelease     bool
+	Resume                bool
 }
 
 func Run(args []string, output, errorOutput io.Writer) error {
@@ -88,11 +95,13 @@ func newCommand(application app) *ucli.Command {
 		resetCommand(application),
 		diffCommand(application),
 		commitCommand(application),
+		uncommitCommand(application),
 		logCommand(application),
 		pullCommand(application),
 		mergeCommand(application),
 		migrateCommand(application),
 		pushCommand(application),
+		releaseCommand(application),
 		versionCommand(application),
 	}
 	applyUsagePolicy(root)
@@ -145,6 +154,7 @@ func loginCommand(application app) *ucli.Command {
 			&ucli.StringFlag{Name: "token", Usage: "access token (reads GEW_TOKEN when omitted)", Sources: ucli.EnvVars("GEW_TOKEN"), Destination: &options.Token},
 			&ucli.StringFlag{Name: "auth-kind", Usage: "authentication kind", Destination: &options.AuthKind},
 			&ucli.StringFlag{Name: "username", Usage: "authentication username", Destination: &options.Username},
+			&ucli.StringFlag{Name: "request-timeout", Usage: "per-request timeout (1s to 30m)", Sources: ucli.EnvVars("GEW_HTTP_TIMEOUT"), Destination: &options.RequestTimeout},
 			&ucli.BoolFlag{Name: "insecure", Usage: "skip TLS verification", Destination: &options.Insecure},
 		},
 		Action: func(ctx context.Context, command *ucli.Command) error {
@@ -238,6 +248,13 @@ func commitCommand(application app) *ucli.Command {
 	}
 }
 
+func uncommitCommand(application app) *ucli.Command {
+	return &ucli.Command{
+		Name: "uncommit", Usage: "undo the newest unpushed commit and restore its staged snapshot",
+		Action: noArgsAction(application.uncommitOperation),
+	}
+}
+
 func nonblank(name string) func(string) error {
 	return func(value string) error {
 		if strings.TrimSpace(value) == "" {
@@ -309,6 +326,36 @@ func pushCommand(application app) *ucli.Command {
 		Name: "push", Usage: "publish queued commits through the forge API",
 		Flags:  []ucli.Flag{&ucli.StringFlag{Name: "new-branch", Usage: "commit changes to a new branch", Destination: &newBranch}},
 		Action: noArgsAction(func(ctx context.Context) error { return application.pushOperation(ctx, newBranch) }),
+	}
+}
+
+func releaseCommand(application app) *ucli.Command {
+	return &ucli.Command{
+		Name: "release", Usage: "publish forge-hosted releases",
+		Commands: []*ucli.Command{releaseCreateCommand(application)},
+	}
+}
+
+func releaseCreateCommand(application app) *ucli.Command {
+	options := releaseCreateOptions{}
+	return &ucli.Command{
+		Name: "create", Usage: "create a tagged release and upload assets", ArgsUsage: "TAG",
+		Flags: []ucli.Flag{
+			&ucli.StringFlag{Name: "title", Usage: "release title", Required: true, Destination: &options.Title, Validator: nonblank("title")},
+			&ucli.StringFlag{Name: "notes-file", Usage: "release notes file (maximum 1 MiB)", Required: true, Destination: &options.NotesFile},
+			&ucli.StringSliceFlag{Name: "asset", Usage: "asset file to upload (repeatable)", Required: true, Destination: &options.Assets},
+			&ucli.BoolFlag{Name: "draft", Usage: "create a draft release", Destination: &options.Draft},
+			&ucli.BoolFlag{Name: "prerelease", Usage: "mark the release as a prerelease", Destination: &options.Prerelease},
+			&ucli.BoolFlag{Name: "resume", Usage: "resume an exactly matching existing release", Destination: &options.Resume},
+		},
+		Action: func(ctx context.Context, command *ucli.Command) error {
+			if err := requireArity(command, 1, 1); err != nil {
+				return err
+			}
+			options.Tag = command.Args().First()
+			options.Title = strings.TrimSpace(options.Title)
+			return application.releaseCreateOperation(ctx, options)
+		},
 	}
 }
 

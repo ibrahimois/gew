@@ -171,20 +171,48 @@ func TestGitExportAmbiguousAcceptedResponseReconcilesWithoutDuplicate(t *testing
 		t.Fatal(err)
 	}
 	forge := &gitExportForge{head: "remote-base", files: map[string][]byte{"README.md": []byte("base\n")}, loseResult: true}
-	if err := a.gitPushWithForge(context.Background(), root, state, "", forge); err == nil || forge.applyCount != 1 {
-		t.Fatalf("ambiguous first push = %v, count %d", err, forge.applyCount)
-	}
-	if _, err := os.Stat(exportPreparedPath(root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.gitPushWithForge(context.Background(), root, state, "", forge); err != nil {
-		t.Fatal(err)
+	if err := a.gitPushWithForge(context.Background(), root, state, "", forge); err != nil || forge.applyCount != 1 {
+		t.Fatalf("same-invocation reconciliation = %v, count %d", err, forge.applyCount)
 	}
 	if forge.applyCount != 1 {
 		t.Fatalf("reconciliation duplicated remote commit: %d", forge.applyCount)
 	}
 	if _, err := os.Stat(exportPreparedPath(root)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("prepared journal remains: %v", err)
+	}
+}
+
+func TestGitUncommitSoftResetsNewestUnpushedCommit(t *testing.T) {
+	root, state := makeGitWorkspace(t)
+	a := app{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.gitAdd(root, state, []string{filepath.Join(root, "README.md")}, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GEW_AUTHOR_NAME", "Gew User")
+	t.Setenv("GEW_AUTHOR_EMAIL", "gew@example.invalid")
+	if err := a.gitCommit(root, state, "change", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.gitUncommit(root, state); err != nil {
+		t.Fatal(err)
+	}
+	repository, worktree, err := openGitWorkspace(root, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := pendingGitCommits(repository, state.Hybrid.TrackingRef)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%v err=%v", pending, err)
+	}
+	headFiles, indexFiles, worktreeFiles, err := gitSnapshots(repository, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byteSnapshotChanges(headFiles, indexFiles)) != 1 || len(byteSnapshotChanges(indexFiles, worktreeFiles)) != 0 {
+		t.Fatalf("soft reset snapshots head=%q index=%q worktree=%q", headFiles["README.md"], indexFiles["README.md"], worktreeFiles["README.md"])
 	}
 }
 

@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -83,16 +86,46 @@ type giteaChangeFilesRequest struct {
 	Files     []giteaChangeOperation `json:"files"`
 }
 
+type giteaFilesResponse struct {
+	Commit struct {
+		SHA     string `json:"sha"`
+		Message string `json:"message"`
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
+	} `json:"commit"`
+}
+
 type giteaForge struct {
 	baseURL   string
 	requester *forge.HTTPRequester
 }
 
 var (
-	_ forge.Forge             = (*giteaForge)(nil)
-	_ forge.ForgeSnapshotter  = (*giteaForge)(nil)
-	_ forge.ForgeCommitWriter = (*giteaForge)(nil)
+	_ forge.Forge                 = (*giteaForge)(nil)
+	_ forge.ForgeSnapshotter      = (*giteaForge)(nil)
+	_ forge.ForgeCommitWriter     = (*giteaForge)(nil)
+	_ forge.ForgeReleasePublisher = (*giteaForge)(nil)
 )
+
+type giteaRelease struct {
+	ID              int64  `json:"id"`
+	TagName         string `json:"tag_name"`
+	TargetCommitish string `json:"target_commitish"`
+	Name            string `json:"name"`
+	Body            string `json:"body"`
+	URL             string `json:"html_url"`
+	Draft           bool   `json:"draft"`
+	Prerelease      bool   `json:"prerelease"`
+}
+
+type giteaReleaseAsset struct {
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Size          int64  `json:"size"`
+	DownloadCount int64  `json:"download_count"`
+	BrowserURL    string `json:"browser_download_url"`
+}
 
 func New(p forge.Config) (*giteaForge, error) {
 	server, err := forge.NormalizeServerURL(p.URL)
@@ -100,6 +133,7 @@ func New(p forge.Config) (*giteaForge, error) {
 		return nil, err
 	}
 	p.Provider = forge.ForgeGitea
+	p.HTTP1Only = true
 	if p.AuthKind != forge.AuthToken && p.AuthKind != forge.AuthBearer {
 		return nil, fmt.Errorf("gitea does not support authentication kind %q", p.AuthKind)
 	}
@@ -110,9 +144,13 @@ func New(p forge.Config) (*giteaForge, error) {
 		}
 		request.Header.Set("Authorization", prefix+p.Token)
 	}
+	requester, err := forge.NewHTTPRequester(p, server, auth, make(http.Header))
+	if err != nil {
+		return nil, err
+	}
 	return &giteaForge{
 		baseURL:   server,
-		requester: forge.NewHTTPRequester(p, server, auth, make(http.Header)),
+		requester: requester,
 	}, nil
 }
 
@@ -232,7 +270,9 @@ func (g *giteaForge) ApplyCommit(ctx context.Context, request forge.ApplyCommitR
 		return forge.ApplyCommitResult{}, forge.ErrUnsupported
 	}
 	operations := make([]giteaChangeOperation, 0, len(request.Changes))
+	var rawBytes int64
 	for _, change := range request.Changes {
+		rawBytes += int64(len(change.Content))
 		operation := giteaChangeOperation{Operation: change.Operation, Path: change.Path, SHA: change.BlobID}
 		if change.Operation != "delete" {
 			operation.Content = base64.StdEncoding.EncodeToString(change.Content)
@@ -240,8 +280,25 @@ func (g *giteaForge) ApplyCommit(ctx context.Context, request forge.ApplyCommitR
 		operations = append(operations, operation)
 	}
 	payload := giteaChangeFilesRequest{Branch: request.Branch, NewBranch: request.NewBranch, Message: request.Message, Files: operations}
-	var response json.RawMessage
-	if err := g.requester.DoJSON(ctx, http.MethodPost, giteaRepoAPIPath(request.Repository)+"/contents", payload, &response); err != nil {
+	var response giteaFilesResponse
+	temporary, err := os.CreateTemp("", "gew-gitea-commit-*")
+	if err != nil {
+		return forge.ApplyCommitResult{}, err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	defer temporary.Close()
+	if err := json.NewEncoder(temporary).Encode(payload); err != nil {
+		return forge.ApplyCommitResult{}, err
+	}
+	stat, err := temporary.Stat()
+	if err != nil {
+		return forge.ApplyCommitResult{}, err
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		return forge.ApplyCommitResult{}, err
+	}
+	if err := g.requester.DoBody(ctx, http.MethodPost, giteaRepoAPIPath(request.Repository)+"/contents", "application/json", stat.Size(), temporary, &response); err != nil {
 		var remoteErr *forge.RemoteError
 		if errors.As(err, &remoteErr) && (remoteErr.Status == http.StatusNotFound || remoteErr.Status == http.StatusMethodNotAllowed) {
 			return forge.ApplyCommitResult{}, fmt.Errorf("%w; this gitea version may not support atomic multi-file changes", err)
@@ -249,21 +306,110 @@ func (g *giteaForge) ApplyCommit(ctx context.Context, request forge.ApplyCommitR
 		if forge.RemoteErrorHasStatus(err, http.StatusConflict, http.StatusPreconditionFailed, http.StatusUnprocessableEntity) {
 			err = forge.ConfirmStaleHead(ctx, g, request.Repository, request.Branch, request.ExpectedHead, err)
 		}
+		if errors.Is(err, forge.ErrRequestTooLarge) || rawBytes >= 8<<20 {
+			encodedBytes := ((rawBytes + 2) / 3) * 4
+			return forge.ApplyCommitResult{}, fmt.Errorf("gitea atomic commit payload has %d change(s), %d raw bytes, and about %d base64 bytes: %w", len(request.Changes), rawBytes, encodedBytes, err)
+		}
 		return forge.ApplyCommitResult{}, err
 	}
-	target := request.Branch
-	if request.NewBranch != "" {
-		target = request.NewBranch
+	if response.Commit.SHA == "" {
+		return forge.ApplyCommitResult{}, errors.New("gitea returned an empty commit ID")
 	}
-	commitID, err := g.Head(ctx, request.Repository, target)
+	parents := make([]string, 0, len(response.Commit.Parents))
+	for _, parent := range response.Commit.Parents {
+		parents = append(parents, parent.SHA)
+	}
+	return forge.ApplyCommitResult{CommitID: response.Commit.SHA, ParentIDs: parents, ConditionalRef: false}, nil
+}
+
+func (g *giteaForge) FindReleaseByTag(ctx context.Context, ref forge.RepositoryRef, tag string) (forge.RemoteRelease, error) {
+	var response giteaRelease
+	endpoint := giteaRepoAPIPath(ref) + "/releases/tags/" + url.PathEscape(tag)
+	if err := g.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return forge.RemoteRelease{}, err
+	}
+	return remoteGiteaRelease(response), nil
+}
+
+func (g *giteaForge) CreateRelease(ctx context.Context, request forge.CreateReleaseRequest) (forge.RemoteRelease, error) {
+	payload := struct {
+		TagName         string `json:"tag_name"`
+		TargetCommitish string `json:"target_commitish"`
+		Name            string `json:"name"`
+		Body            string `json:"body"`
+		Draft           bool   `json:"draft"`
+		Prerelease      bool   `json:"prerelease"`
+	}{request.TagName, request.TargetCommit, request.Title, request.Notes, request.Draft, request.Prerelease}
+	var response giteaRelease
+	if err := g.requester.DoJSON(ctx, http.MethodPost, giteaRepoAPIPath(request.Repository)+"/releases", payload, &response); err != nil {
+		return forge.RemoteRelease{}, err
+	}
+	return remoteGiteaRelease(response), nil
+}
+
+func (g *giteaForge) ListReleaseAssets(ctx context.Context, ref forge.RepositoryRef, releaseID string) ([]forge.RemoteReleaseAsset, error) {
+	var response []giteaReleaseAsset
+	endpoint := giteaRepoAPIPath(ref) + "/releases/" + url.PathEscape(releaseID) + "/assets"
+	if err := g.requester.DoJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return nil, err
+	}
+	assets := make([]forge.RemoteReleaseAsset, 0, len(response))
+	for _, asset := range response {
+		assets = append(assets, remoteGiteaAsset(asset))
+	}
+	return assets, nil
+}
+
+func (g *giteaForge) UploadReleaseAsset(ctx context.Context, ref forge.RepositoryRef, releaseID, name string, size int64, content io.Reader) (forge.RemoteReleaseAsset, error) {
+	temporary, err := os.CreateTemp("", "gew-release-asset-*")
 	if err != nil {
-		return forge.ApplyCommitResult{}, fmt.Errorf("commit may have been submitted, but refreshing branch state failed: %w", err)
+		return forge.RemoteReleaseAsset{}, err
 	}
-	details, err := g.CommitDetails(ctx, request.Repository, commitID)
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	defer temporary.Close()
+
+	writer := multipart.NewWriter(temporary)
+	part, err := writer.CreateFormFile("attachment", name)
 	if err != nil {
-		return forge.ApplyCommitResult{}, fmt.Errorf("commit %s was submitted, but reading its parents failed: %w", commitID, err)
+		return forge.RemoteReleaseAsset{}, err
 	}
-	return forge.ApplyCommitResult{CommitID: commitID, ParentIDs: details.ParentIDs, ConditionalRef: false}, nil
+	written, err := io.Copy(part, io.LimitReader(content, size+1))
+	if err != nil {
+		return forge.RemoteReleaseAsset{}, err
+	}
+	if written != size {
+		return forge.RemoteReleaseAsset{}, fmt.Errorf("asset %q supplied %d bytes, want %d", name, written, size)
+	}
+	if err := writer.Close(); err != nil {
+		return forge.RemoteReleaseAsset{}, err
+	}
+	stat, err := temporary.Stat()
+	if err != nil {
+		return forge.RemoteReleaseAsset{}, err
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		return forge.RemoteReleaseAsset{}, err
+	}
+	endpoint := giteaRepoAPIPath(ref) + "/releases/" + url.PathEscape(releaseID) + "/assets?name=" + url.QueryEscape(name)
+	var response giteaReleaseAsset
+	if err := g.requester.DoBody(ctx, http.MethodPost, endpoint, writer.FormDataContentType(), stat.Size(), temporary, &response); err != nil {
+		return forge.RemoteReleaseAsset{}, err
+	}
+	return remoteGiteaAsset(response), nil
+}
+
+func (g *giteaForge) DownloadReleaseAsset(ctx context.Context, ref forge.RepositoryRef, asset forge.RemoteReleaseAsset) (io.ReadCloser, error) {
+	endpoint := giteaRepoAPIPath(ref) + "/releases/assets/" + url.PathEscape(asset.ID)
+	return g.requester.DownloadReader(ctx, endpoint, "application/octet-stream")
+}
+
+func remoteGiteaRelease(release giteaRelease) forge.RemoteRelease {
+	return forge.RemoteRelease{ID: strconv.FormatInt(release.ID, 10), TagName: release.TagName, TargetCommit: release.TargetCommitish, Title: release.Name, Notes: release.Body, URL: release.URL, Draft: release.Draft, Prerelease: release.Prerelease}
+}
+
+func remoteGiteaAsset(asset giteaReleaseAsset) forge.RemoteReleaseAsset {
+	return forge.RemoteReleaseAsset{ID: strconv.FormatInt(asset.ID, 10), Name: asset.Name, Size: asset.Size, URL: asset.BrowserURL}
 }
 
 func giteaRepoAPIPath(ref forge.RepositoryRef) string {
