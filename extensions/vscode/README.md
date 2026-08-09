@@ -44,7 +44,8 @@ Run **GEW: Disable for Current Repository** from the Command Palette or the Sour
 
 When at least one enabled hybrid repository is open and the workspace is trusted:
 
-- **GEW: Sync via REST** appears as the primary Source Control toolbar action.
+- A separate **GEW REST** section appears in the Source Control sidebar with a large **Sync via GEW REST** button and smaller Pull and Push buttons.
+- **GEW: Sync via REST** also appears as a compact Source Control toolbar action.
 - **GEW: Pull via REST**, **GEW: Push via REST**, and Disable appear in the Source Control overflow menu.
 - Sync runs Pull first and runs Push only after Pull completes successfully.
 - Progress and CLI output are available in the **GEW Source Control** OutputChannel.

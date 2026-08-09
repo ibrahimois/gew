@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 import { GewRunner } from './gewRunner';
 import { Operations } from './operations';
+import { GewSyncViewProvider } from './syncView';
 import {
   ENABLED_REPOSITORIES_KEY,
   RepositoryRegistry,
@@ -55,9 +56,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
     runner,
   );
 
+  const syncView = new GewSyncViewProvider({
+    sync: async (): Promise<void> => operations.sync(),
+    pull: async (): Promise<void> => operations.pull(),
+    push: async (): Promise<void> => operations.push(),
+  });
+
   context.subscriptions.push(
     output,
     registry.listen(),
+    vscode.window.registerWebviewViewProvider(GewSyncViewProvider.viewType, syncView),
     vscode.commands.registerCommand('gew.enableRepository', async (resource?: unknown) => {
       const result = await registry.enable(asResourcePath(resource));
       switch (result.status) {

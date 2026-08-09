@@ -96,6 +96,17 @@
         }
       ]
     },
+    "views": {
+      "scm": [
+        {
+          "type": "webview",
+          "id": "gew.syncView",
+          "name": "GEW REST",
+          "when": "gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "visibility": "visible"
+        }
+      ]
+    },
     "configuration": {
       "title": "GEW",
       "properties": {
