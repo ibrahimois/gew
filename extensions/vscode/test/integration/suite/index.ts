@@ -11,6 +11,7 @@ const extensionId = 'ibrahimois.gew-vscode';
 const commandIds = [
   'gew.enableRepository',
   'gew.disableRepository',
+  'gew.showSyncView',
   'gew.pull',
   'gew.push',
   'gew.sync',

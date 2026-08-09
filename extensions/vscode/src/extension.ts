@@ -19,7 +19,6 @@ export interface GewExtensionApi {
 export async function activate(context: vscode.ExtensionContext): Promise<GewExtensionApi> {
   const output = vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
   const registry = new RepositoryRegistry(createRegistryHost(context));
-  await registry.initialize();
 
   const runner = new GewRunner(output);
   const operations = new Operations(
@@ -66,14 +65,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
     output,
     registry.listen(),
     vscode.window.registerWebviewViewProvider(GewSyncViewProvider.viewType, syncView),
+    vscode.commands.registerCommand('gew.showSyncView', async () => showSyncView()),
     vscode.commands.registerCommand('gew.enableRepository', async (resource?: unknown) => {
       const result = await registry.enable(asResourcePath(resource));
       switch (result.status) {
         case 'enabled':
           await vscode.window.showInformationMessage(`Enabled GEW Source Control for ${result.root}.`);
+          await showSyncView();
           break;
         case 'alreadyEnabled':
           await vscode.window.showInformationMessage(`GEW Source Control is already enabled for ${result.root}.`);
+          await showSyncView();
           break;
         case 'notHybrid':
           await vscode.window.showErrorMessage(
@@ -96,10 +98,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
     vscode.commands.registerCommand('gew.sync', async () => operations.sync()),
   );
 
+  // Register the webview provider before restoring the context key that makes
+  // the view visible. Otherwise VS Code can reveal the contributed view while
+  // no provider is available and leave it unresolved for the session.
+  await registry.initialize();
+
   return { registry };
 }
 
 export function deactivate(): void {}
+
+async function showSyncView(): Promise<void> {
+  await vscode.commands.executeCommand('workbench.view.scm');
+  await vscode.commands.executeCommand(`${GewSyncViewProvider.viewType}.focus`);
+}
 
 function createRegistryHost(context: vscode.ExtensionContext): RepositoryRegistryHost {
   return {
