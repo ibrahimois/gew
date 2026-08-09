@@ -245,6 +245,18 @@ Migration refuses an existing `.git`, validates the remote head, replays queued
 commits, and keeps checksummed source data under `.gew/legacy/`. Reverse
 migration and implicit adoption of an existing Git repository are unsupported.
 
+## VS Code
+
+The optional [GEW Source Control extension](extensions/vscode/README.md) adds
+explicit GEW Pull, Push, and Sync actions to VS Code for enabled hybrid
+workspaces. A repository must contain both `.git` and `.gew`; VS Code's built-in
+Git extension owns local status, diff, stage, commit, and Git transport commands,
+while the GEW actions invoke the public CLI for REST synchronization.
+
+The extension does not replace built-in Git Sync. All GEW network access remains
+HTTPS REST-only: neither GEW nor the extension invokes Git transport, SSH, smart
+HTTP, hooks, filters, or credential helpers.
+
 ## Safety model
 
 - Push refuses a changed remote head; provider policy and validation errors are
