@@ -111,6 +111,10 @@ export function deactivate(): void {}
 async function showSyncView(): Promise<void> {
   await vscode.commands.executeCommand('workbench.view.scm');
   await vscode.commands.executeCommand(`${GewSyncViewProvider.viewType}.focus`);
+  // Focusing the GEW sibling view can cause VS Code to leave its built-in
+  // Changes view hidden. Focus Changes last so both share the same Source
+  // Control container and the commit/change workflow remains primary.
+  await vscode.commands.executeCommand('workbench.scm.focus');
 }
 
 function createRegistryHost(context: vscode.ExtensionContext): RepositoryRegistryHost {
