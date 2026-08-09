@@ -44,8 +44,7 @@ Run **GEW: Disable for Current Repository** from the Command Palette or the Sour
 
 When at least one enabled hybrid repository is open and the workspace is trusted:
 
-- A separate **GEW REST** section appears in the Source Control sidebar with a large **Sync via GEW REST** button and smaller Pull and Push buttons. Run **GEW: Show REST Sync Controls** if VS Code has collapsed or hidden the section.
-- **GEW: Sync via REST** also appears as a compact Source Control toolbar action.
+- **GEW: Sync via REST** appears as a compact action on VS Code's existing Source Control view; no second Source Control page is added.
 - **GEW: Pull via REST**, **GEW: Push via REST**, and Disable appear in the Source Control overflow menu.
 - Sync runs Pull first and runs Push only after Pull completes successfully.
 - Progress and CLI output are available in the **GEW Source Control** OutputChannel.

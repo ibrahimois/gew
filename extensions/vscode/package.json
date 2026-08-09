@@ -27,7 +27,6 @@
     "onStartupFinished",
     "onCommand:gew.enableRepository",
     "onCommand:gew.disableRepository",
-    "onCommand:gew.showSyncView",
     "onCommand:gew.pull",
     "onCommand:gew.push",
     "onCommand:gew.sync"
@@ -55,11 +54,6 @@
         "category": "GEW"
       },
       {
-        "command": "gew.showSyncView",
-        "title": "GEW: Show REST Sync Controls",
-        "category": "GEW"
-      },
-      {
         "command": "gew.pull",
         "title": "GEW: Pull via REST",
         "category": "GEW",
@@ -81,11 +75,6 @@
     "menus": {
       "scm/title": [
         {
-          "command": "gew.showSyncView",
-          "when": "gew.hasEnabledHybridRepository && isWorkspaceTrusted",
-          "group": "gew@0"
-        },
-        {
           "command": "gew.sync",
           "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
           "group": "navigation"
@@ -104,17 +93,6 @@
           "command": "gew.disableRepository",
           "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
           "group": "gew@3"
-        }
-      ]
-    },
-    "views": {
-      "scm": [
-        {
-          "type": "webview",
-          "id": "gew.syncView",
-          "name": "GEW REST",
-          "when": "gew.hasEnabledHybridRepository && isWorkspaceTrusted",
-          "visibility": "visible"
         }
       ]
     },

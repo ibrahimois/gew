@@ -11,7 +11,6 @@ const extensionId = 'ibrahimois.gew-vscode';
 const commandIds = [
   'gew.enableRepository',
   'gew.disableRepository',
-  'gew.showSyncView',
   'gew.pull',
   'gew.push',
   'gew.sync',
@@ -23,7 +22,6 @@ export async function run(): Promise<void> {
   const api = await extension.activate();
 
   await verifyCommands();
-  await verifyContributedSyncView();
   await verifyIsolatedLaunchArguments();
   await verifyEnableDisable(api);
   await verifyGewOnlyRejection(api);
@@ -36,17 +34,6 @@ async function verifyCommands(): Promise<void> {
   for (const command of commandIds) {
     assert.ok(commands.includes(command), `Expected command ${command} to be registered`);
   }
-}
-
-async function verifyContributedSyncView(): Promise<void> {
-  const extension = vscode.extensions.getExtension(extensionId);
-  assert.ok(extension);
-  const manifest = extension.packageJSON as {
-    contributes?: { views?: { scm?: Array<{ id?: string; name?: string; type?: string }> } };
-  };
-  assert.ok(manifest.contributes?.views?.scm?.some((view) =>
-    view.id === 'gew.syncView' && view.name === 'GEW REST' && view.type === 'webview',
-  ));
 }
 
 async function verifyIsolatedLaunchArguments(): Promise<void> {

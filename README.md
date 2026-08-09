@@ -247,9 +247,8 @@ migration and implicit adoption of an existing Git repository are unsupported.
 
 ## VS Code
 
-The optional [GEW Source Control extension](extensions/vscode/README.md) adds
-a dedicated GEW REST section with a prominent Sync button, plus explicit GEW
-Pull, Push, and compact Sync actions, to VS Code for enabled hybrid workspaces. A repository must contain both `.git` and `.gew`; VS Code's built-in
+The optional [GEW Source Control extension](extensions/vscode/README.md) adds explicit GEW Pull, Push, and Sync actions to VS Code's existing Source
+Control view for enabled hybrid workspaces, without adding a second Source Control page. A repository must contain both `.git` and `.gew`; VS Code's built-in
 Git extension owns local status, diff, stage, commit, and Git transport commands,
 while the GEW actions invoke the public CLI for REST synchronization.
 

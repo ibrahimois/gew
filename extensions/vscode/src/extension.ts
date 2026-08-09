@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 
 import { GewRunner } from './gewRunner';
 import { Operations } from './operations';
-import { GewSyncViewProvider } from './syncView';
 import {
   ENABLED_REPOSITORIES_KEY,
   RepositoryRegistry,
@@ -55,27 +54,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
     runner,
   );
 
-  const syncView = new GewSyncViewProvider({
-    sync: async (): Promise<void> => operations.sync(),
-    pull: async (): Promise<void> => operations.pull(),
-    push: async (): Promise<void> => operations.push(),
-  });
-
   context.subscriptions.push(
     output,
     registry.listen(),
-    vscode.window.registerWebviewViewProvider(GewSyncViewProvider.viewType, syncView),
-    vscode.commands.registerCommand('gew.showSyncView', async () => showSyncView()),
     vscode.commands.registerCommand('gew.enableRepository', async (resource?: unknown) => {
       const result = await registry.enable(asResourcePath(resource));
       switch (result.status) {
         case 'enabled':
           await vscode.window.showInformationMessage(`Enabled GEW Source Control for ${result.root}.`);
-          await showSyncView();
+          await vscode.commands.executeCommand('workbench.view.scm');
           break;
         case 'alreadyEnabled':
           await vscode.window.showInformationMessage(`GEW Source Control is already enabled for ${result.root}.`);
-          await showSyncView();
+          await vscode.commands.executeCommand('workbench.view.scm');
           break;
         case 'notHybrid':
           await vscode.window.showErrorMessage(
@@ -107,15 +98,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
 }
 
 export function deactivate(): void {}
-
-async function showSyncView(): Promise<void> {
-  await vscode.commands.executeCommand('workbench.view.scm');
-  await vscode.commands.executeCommand(`${GewSyncViewProvider.viewType}.focus`);
-  // Focusing the GEW sibling view can cause VS Code to leave its built-in
-  // Changes view hidden. Focus Changes last so both share the same Source
-  // Control container and the commit/change workflow remains primary.
-  await vscode.commands.executeCommand('workbench.scm.focus');
-}
 
 function createRegistryHost(context: vscode.ExtensionContext): RepositoryRegistryHost {
   return {
