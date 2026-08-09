@@ -1,0 +1,133 @@
+{
+  "name": "gew-vscode",
+  "displayName": "GEW Source Control",
+  "description": "Repository-scoped GEW Pull, Push, and Sync actions for hybrid workspaces.",
+  "version": "0.1.0",
+  "publisher": "ibrahimois",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ibrahimois/gew.git"
+  },
+  "engines": {
+    "vscode": "^1.125.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "gew",
+    "source control",
+    "rest",
+    "git"
+  ],
+  "main": "./out/src/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:gew.enableRepository",
+    "onCommand:gew.disableRepository",
+    "onCommand:gew.pull",
+    "onCommand:gew.push",
+    "onCommand:gew.sync"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "The extension activates in Restricted Mode so GEW commands can refuse execution without starting a process."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "GEW requires local .git and .gew directories."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "gew.enableRepository",
+        "title": "GEW: Enable for Current Repository",
+        "category": "GEW"
+      },
+      {
+        "command": "gew.disableRepository",
+        "title": "GEW: Disable for Current Repository",
+        "category": "GEW"
+      },
+      {
+        "command": "gew.pull",
+        "title": "GEW: Pull via REST",
+        "category": "GEW",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "gew.push",
+        "title": "GEW: Push via REST",
+        "category": "GEW",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "gew.sync",
+        "title": "GEW: Sync via REST",
+        "category": "GEW",
+        "icon": "$(sync)"
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "gew.sync",
+          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "group": "navigation"
+        },
+        {
+          "command": "gew.pull",
+          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "group": "gew@1"
+        },
+        {
+          "command": "gew.push",
+          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "group": "gew@2"
+        },
+        {
+          "command": "gew.disableRepository",
+          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "group": "gew@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GEW",
+      "properties": {
+        "gew.executablePath": {
+          "type": "string",
+          "default": "gew",
+          "scope": "machine",
+          "markdownDescription": "Machine-local path or command name for the GEW executable. The extension passes this value directly to the operating system without a shell."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"const fs=require('node:fs'); for (const p of ['out','.vscode-test','../../dist/gew-vscode-0.1.0.vsix']) fs.rmSync(p,{recursive:true,force:true}); for (const f of fs.readdirSync('.')) if (f.endsWith('.vsix')) fs.rmSync(f,{force:true});\"",
+    "compile": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint 'src/**/*.ts' 'test/**/*.ts' --max-warnings 0",
+    "test:unit": "npm run compile && node --require ./out/test/unit/setup.js --test out/test/unit/*.test.js",
+    "test:integration": "npm run compile && node out/test/integration/runTest.js",
+    "test": "npm run compile && npm run typecheck && npm run lint && npm run test:unit && npm run test:integration",
+    "package": "npm test && node -e \"require('node:fs').mkdirSync('../../dist',{recursive:true})\" && vsce package --out ../../dist/gew-vscode-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.2",
+    "@types/mock-require": "3.0.0",
+    "@types/node": "22.20.0",
+    "@types/vscode": "1.125.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "3.9.2",
+    "eslint": "9.39.2",
+    "mock-require": "3.0.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.54.0"
+  }
+}

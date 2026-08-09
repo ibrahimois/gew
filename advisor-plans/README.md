@@ -12,7 +12,8 @@ derived from the live GitHub/Gitea v0.5.0 publication on 2026-08-08.
 Plans 006–010 are the REST-native synchronization performance stream. They
 preserve exact-revision reads, atomic expected-head writes, ambiguous-response
 reconciliation, one local commit per remote commit, and the prohibition on Git
-transport or provider subprocesses.
+transport or provider subprocesses. Plan 011 adds an optional VS Code layer for
+hybrid workspaces without redirecting built-in Git transport commands.
 
 ## Execution order and status
 
@@ -28,6 +29,7 @@ transport or provider subprocesses.
 | [008](008-capability-driven-rest-snapshots.md) | Select fast REST snapshot strategies per provider | P1 | L | 007 | DONE |
 | [009](009-transactional-delta-pull.md) | Pull REST manifests and apply only changed paths | P1 | L | 006, 007, 008 | DONE |
 | [010](010-rest-native-push-proof.md) | Prove REST pushes without downloading the repository per commit | P1 | L | 006, 008, 009 | DONE |
+| [011](011-vscode-source-control-extension.md) | Add repository-scoped GEW actions to VS Code Source Control | P2 | M | — | DONE |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
 `REJECTED (<reason>)`.
@@ -81,6 +83,9 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
   Plan 003's no-blind-mutation-retry policy and Plan 009's manifest model.
 - Plans 007 and 008 may be developed on separate branches only if 008 is rebased
   onto the final artifact API before review. Plans 009 and 010 are sequential.
+- Plan 011 is independent of the completed synchronization stream. It consumes
+  the public CLI only, remains hybrid-backend-only, and must not import Go
+  internals or replace VS Code's built-in `git.*` commands.
 
 ## Findings considered and rejected
 
@@ -125,3 +130,12 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED (<reason>)`, or
   commit Tree metadata is the portable REST contract. Compare endpoints may
   optimize candidates, but Plan 009 validates against Tree and works without
   provider-specific compare support.
+- **Redirect VS Code's built-in Git Sync command to GEW**: rejected. VS Code's
+  public configuration/API does not replace Git transport commands with a
+  non-Git CLI; Plan 011 contributes separate, explicit GEW actions.
+- **Implement a full GEW SCM provider in the first extension release**:
+  rejected. Hybrid workspaces already expose local status, diff, stage, and
+  commit through `.git`; v0.1.0 only bridges Pull, Push, and Sync to GEW.
+- **Store repository enablement under `.gew` or `.vscode`**: rejected. GEW
+  internals must remain private, and repository-controlled editor settings
+  should not select an executable. Plan 011 uses machine-local extension state.
