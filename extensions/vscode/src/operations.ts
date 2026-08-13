@@ -7,14 +7,14 @@ export type OperationPhase = 'Pull' | 'Push';
 
 export interface OperationHost {
   readonly isTrusted: boolean;
-  resolveTarget(): Promise<string | undefined>;
+  resolveTarget(requestedPath?: string): Promise<string | undefined>;
   getExecutablePath(): string;
   runWithProgress<T>(
     title: string,
     task: (token: CancellationTokenLike, report: (message: string) => void) => Promise<T>,
   ): Promise<T>;
-  showInformation(message: string): Promise<void>;
-  showError(message: string): Promise<void>;
+  showInformation(message: string): void;
+  showError(message: string): void;
   revealOutput(): void;
 }
 
@@ -39,27 +39,33 @@ export class Operations {
     private readonly runner: OperationRunner,
   ) {}
 
-  public async pull(): Promise<void> {
-    await this.execute('Pull', ['Pull']);
+  public async pull(requestedPath?: string): Promise<void> {
+    await this.execute('Pull', ['Pull'], requestedPath);
   }
 
-  public async push(): Promise<void> {
-    await this.execute('Push', ['Push']);
+  public async push(requestedPath?: string): Promise<void> {
+    await this.execute('Push', ['Push'], requestedPath);
   }
 
-  public async sync(): Promise<void> {
-    await this.execute('Sync', ['Pull', 'Push']);
+  public async sync(requestedPath?: string): Promise<void> {
+    await this.execute('Sync', ['Pull', 'Push'], requestedPath);
   }
 
-  private async execute(operation: OperationName, phases: readonly OperationPhase[]): Promise<void> {
+  private async execute(
+    operation: OperationName,
+    phases: readonly OperationPhase[],
+    requestedPath?: string,
+  ): Promise<void> {
     if (!this.host.isTrusted) {
-      await this.host.showInformation(`GEW ${operation} is unavailable until this workspace is trusted.`);
+      this.host.showInformation(`GEW ${operation} is unavailable until this workspace is trusted.`);
       return;
     }
 
-    const root = await this.host.resolveTarget();
+    const root = await this.host.resolveTarget(requestedPath);
     if (root === undefined) {
-      await this.host.showInformation('Enable an open hybrid repository before running GEW Source Control actions.');
+      this.host.showInformation(
+        'Run "GEW: Enable for Current Repository" for an open hybrid repository before using GEW Source Control actions.',
+      );
       return;
     }
 
@@ -71,7 +77,7 @@ export class Operations {
         throw new Error('The gew.executablePath setting must not be empty.');
       }
     } catch (error: unknown) {
-      await this.fail(operation, error instanceof Error ? error.message : String(error));
+      this.fail(operation, error instanceof Error ? error.message : String(error));
       return;
     }
 
@@ -94,31 +100,31 @@ export class Operations {
                 token,
               });
             } catch (error: unknown) {
-              await this.fail(operation, error instanceof Error ? error.message : String(error));
+              this.fail(operation, error instanceof Error ? error.message : String(error));
               return;
             }
 
             if (result.cancelled) {
-              await this.host.showInformation(`GEW ${operation} cancelled for ${repositoryName}.`);
+              this.host.showInformation(`GEW ${operation} cancelled for ${repositoryName}.`);
               return;
             }
             if (!isSuccess(result)) {
-              await this.fail(operation, describeFailure(result));
+              this.fail(operation, describeFailure(result));
               return;
             }
           }
-          await this.host.showInformation(`GEW ${operation} completed for ${repositoryName}.`);
+          this.host.showInformation(`GEW ${operation} completed for ${repositoryName}.`);
         });
         if (exclusive.status === 'busy') {
-          await this.host.showInformation(`A GEW operation is already running for ${repositoryName}.`);
+          this.host.showInformation(`A GEW operation is already running for ${repositoryName}.`);
         }
       },
     );
   }
 
-  private async fail(operation: OperationName, detail: string): Promise<void> {
+  private fail(operation: OperationName, detail: string): void {
     this.host.revealOutput();
-    await this.host.showError(`GEW ${operation} failed: ${detail}`);
+    this.host.showError(`GEW ${operation} failed: ${detail}`);
   }
 }
 

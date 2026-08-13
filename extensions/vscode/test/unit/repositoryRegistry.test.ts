@@ -135,6 +135,96 @@ describe('RepositoryRegistry', () => {
     assert.deepEqual(registryHost.picks, []);
   });
 
+  it('prefers the repository path supplied by an SCM command', async () => {
+    const first = await makeRepository({ git: true, gew: true });
+    const second = await makeRepository({ git: true, gew: true });
+    const registryHost = createHost({
+      folders: [folder(first), folder(second)],
+      activeFile: path.join(first, 'src', 'active.ts'),
+      state: [first, second],
+    });
+    const registry = await RepositoryRegistry.create(registryHost);
+
+    assert.equal(await registry.resolveOperationTarget(second), await canonicalizePath(second));
+    assert.deepEqual(registryHost.picks, []);
+  });
+
+  it('does not redirect an unknown SCM repository path to another enabled repository', async () => {
+    const first = await makeRepository({ git: true, gew: true });
+    const second = await makeRepository({ git: true, gew: true });
+    const unknown = await makeRepository({ git: true, gew: true });
+    const registryHost = createHost({
+      folders: [folder(first), folder(second), folder(unknown)],
+      activeFile: path.join(first, 'src', 'active.ts'),
+      pick: folder(second),
+      state: [first, second],
+    });
+    const registry = await RepositoryRegistry.create(registryHost);
+
+    assert.equal(await registry.resolveOperationTarget(unknown), undefined);
+    assert.deepEqual(registryHost.picks, []);
+  });
+
+  it('keeps an enabled nested repository available while its parent workspace is open', async () => {
+    const parent = await makeRepository({ git: false, gew: false });
+    const nested = path.join(parent, 'gitops-nic-platform');
+    await fs.promises.mkdir(path.join(nested, '.git'), { recursive: true });
+    await fs.promises.mkdir(path.join(nested, '.gew'));
+    const registryHost = createHost({
+      folders: [folder(parent)],
+      activeFile: path.join(nested, 'deploy', 'application.yaml'),
+      state: [nested],
+    });
+    const registry = await RepositoryRegistry.create(registryHost);
+
+    assert.equal(registryHost.contexts.at(-1), true);
+    assert.equal(await registry.resolveOperationTarget(), await canonicalizePath(nested));
+    assert.equal(await registry.resolveOperationTarget(nested), await canonicalizePath(nested));
+  });
+
+  it('enables an explicitly requested nested SCM repository under an open parent workspace', async () => {
+    const parent = await makeRepository({ git: false, gew: false });
+    const nested = path.join(parent, 'gitops-nic-platform');
+    await fs.promises.mkdir(path.join(nested, '.git'), { recursive: true });
+    await fs.promises.mkdir(path.join(nested, '.gew'));
+    const registryHost = createHost({ folders: [folder(parent)] });
+    const registry = await RepositoryRegistry.create(registryHost);
+
+    const result = await registry.enable(nested);
+
+    assert.equal(result.status, 'enabled');
+    assert.deepEqual(registry.getEnabledPaths(), [await canonicalizePath(nested)]);
+    assert.equal(registryHost.contexts.at(-1), true);
+  });
+
+  it('enables a nested hybrid repository containing the active file', async () => {
+    const parent = await makeRepository({ git: false, gew: false });
+    const nested = path.join(parent, 'gitops-nic-platform');
+    const activeFile = path.join(nested, 'deploy', 'application.yaml');
+    await fs.promises.mkdir(path.join(nested, '.git'), { recursive: true });
+    await fs.promises.mkdir(path.join(nested, '.gew'));
+    await fs.promises.mkdir(path.dirname(activeFile), { recursive: true });
+    await fs.promises.writeFile(activeFile, 'kind: Application\n');
+    const registry = await RepositoryRegistry.create(createHost({
+      folders: [folder(parent)],
+      activeFile,
+    }));
+
+    const result = await registry.enable();
+
+    assert.equal(result.status, 'enabled');
+    assert.deepEqual(registry.getEnabledPaths(), [await canonicalizePath(nested)]);
+  });
+
+  it('does not enable an explicitly requested repository outside the open workspace', async () => {
+    const parent = await makeRepository({ git: false, gew: false });
+    const outside = await makeRepository({ git: true, gew: true });
+    const registry = await RepositoryRegistry.create(createHost({ folders: [folder(parent)] }));
+
+    assert.deepEqual(await registry.enable(outside), { status: 'noSelection' });
+    assert.deepEqual(registry.getEnabledPaths(), []);
+  });
+
   it('returns the sole enabled open folder', async () => {
     const enabled = await makeRepository({ git: true, gew: true });
     const disabled = await makeRepository({ git: true, gew: true });

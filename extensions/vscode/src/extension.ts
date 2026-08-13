@@ -25,7 +25,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
       get isTrusted(): boolean {
         return vscode.workspace.isTrusted;
       },
-      resolveTarget: async (): Promise<string | undefined> => registry.resolveOperationTarget(),
+      resolveTarget: async (requestedPath?: string): Promise<string | undefined> =>
+        registry.resolveOperationTarget(requestedPath),
       getExecutablePath: (): string => vscode.workspace
         .getConfiguration('gew')
         .get<string>('executablePath', 'gew'),
@@ -43,11 +44,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
         },
         async (progress, token) => task(token, (message) => progress.report({ message })),
       ),
-      showInformation: async (message: string): Promise<void> => {
-        await vscode.window.showInformationMessage(message);
+      showInformation: (message: string): void => {
+        void vscode.window.showInformationMessage(message);
       },
-      showError: async (message: string): Promise<void> => {
-        await vscode.window.showErrorMessage(message);
+      showError: (message: string): void => {
+        void vscode.window.showErrorMessage(message);
       },
       revealOutput: (): void => output.show(true),
     },
@@ -84,9 +85,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<GewExt
         await vscode.window.showInformationMessage(`Disabled GEW Source Control for ${result.root}.`);
       }
     }),
-    vscode.commands.registerCommand('gew.pull', async () => operations.pull()),
-    vscode.commands.registerCommand('gew.push', async () => operations.push()),
-    vscode.commands.registerCommand('gew.sync', async () => operations.sync()),
+    vscode.commands.registerCommand('gew.pull', async (resource?: unknown) =>
+      operations.pull(asResourcePath(resource))),
+    vscode.commands.registerCommand('gew.push', async (resource?: unknown) =>
+      operations.push(asResourcePath(resource))),
+    vscode.commands.registerCommand('gew.sync', async (resource?: unknown) =>
+      operations.sync(asResourcePath(resource))),
   );
 
   // Register the webview provider before restoring the context key that makes

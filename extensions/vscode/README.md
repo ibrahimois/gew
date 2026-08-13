@@ -32,20 +32,20 @@ The extension is not published to the VS Code Marketplace and has no telemetry.
 
 ## Enable a repository
 
-1. Open a hybrid repository in VS Code.
+1. Open a hybrid repository, or a parent folder containing one, in VS Code.
 2. Trust the workspace.
-3. Run **GEW: Enable for Current Repository** from the Command Palette.
+3. Select the repository in Source Control and run **GEW: Enable for Current Repository**, or invoke the command from the Command Palette while a file in that repository is active.
 
-Enablement is stored locally in VS Code extension global state using the repository's canonical absolute path. Nothing is added below `.gew`, `.git`, or `.vscode`, and enabling one repository does not enable another.
+Enablement is stored locally in VS Code extension global state using the repository's canonical absolute path. Nested repositories discovered by VS Code remain available while their parent workspace folder is open. Nothing is added below `.gew`, `.git`, or `.vscode`, and enabling one repository does not enable another.
 
 Run **GEW: Disable for Current Repository** from the Command Palette or the Source Control overflow menu to remove the local opt-in.
 
 ## Source Control actions
 
-When at least one enabled hybrid repository is open and the workspace is trusted:
+When the workspace is trusted:
 
-- **GEW: Sync via REST** appears as a compact action on VS Code's existing Source Control view; no second Source Control page is added.
-- **GEW: Pull via REST**, **GEW: Push via REST**, and Disable appear in the Source Control overflow menu.
+- **GEW: Sync via REST** appears as a compact circular action on VS Code's existing Source Control view; no second Source Control page is added. It remains available before enablement so clicking it can explain how to enable a repository.
+- Once at least one enabled hybrid repository is open, **GEW: Pull via REST**, **GEW: Push via REST**, and Disable appear in the Source Control overflow menu.
 - Sync runs Pull first and runs Push only after Pull completes successfully.
 - Progress and CLI output are available in the **GEW Source Control** OutputChannel.
 
@@ -74,7 +74,7 @@ The extension starts the configured executable directly without a shell. It does
 - **Repository is not hybrid:** clone with `gew clone --backend git`, or migrate a clean existing workspace with `gew migrate --to git`. A default `.gew`-only workspace cannot use these Source Control actions.
 - **Dirty pull or merge failure:** resolve the condition using GEW's normal CLI workflow. The extension surfaces CLI failures and does not bypass workspace safety checks.
 - **GitLab or Bitbucket push:** GEW 0.7.0 keeps these providers safety-gated until live concurrency verification passes. The extension reports that CLI failure and does not bypass the provider gate.
-- **Multiple roots:** the active editor is preferred when it belongs to an enabled repository; otherwise the extension prompts instead of selecting arbitrarily.
+- **Multiple repositories:** the repository selected in Source Control is preferred. Otherwise the active editor is preferred when it belongs to an enabled repository; if the target is still ambiguous, the extension prompts instead of selecting arbitrarily.
 - **Operation already running:** overlapping operations are blocked per canonical repository root, while different repositories may run independently.
 
 ## Development

@@ -98,7 +98,7 @@ export class RepositoryRegistry {
 
   public async enable(requestedPath?: string): Promise<EnableResult> {
     const folder = await this.selectWorkspaceFolder(
-      this.host.getWorkspaceFolders(),
+      await this.getEnableCandidates(requestedPath),
       'Select a hybrid repository to enable for GEW',
       requestedPath,
     );
@@ -158,17 +158,44 @@ export class RepositoryRegistry {
     await this.refreshContext();
   }
 
+  private async getEnableCandidates(requestedPath?: string): Promise<WorkspaceFolderInfo[]> {
+    const workspaceFolders = await canonicalizeFolders(this.host.getWorkspaceFolders());
+    let nestedRoot: string | undefined;
+    if (requestedPath !== undefined) {
+      nestedRoot = await canonicalizePath(requestedPath);
+    } else {
+      const activeFilePath = this.host.getActiveFilePath();
+      if (activeFilePath !== undefined) {
+        nestedRoot = await findHybridRepositoryRoot(activeFilePath, workspaceFolders);
+      }
+    }
+
+    if (
+      nestedRoot !== undefined
+      && workspaceFolders.some((folder) => isWithin(nestedRoot, folder.path))
+      && !workspaceFolders.some((folder) => folder.path === nestedRoot)
+    ) {
+      workspaceFolders.push({ name: path.basename(nestedRoot), path: nestedRoot });
+    }
+    return workspaceFolders;
+  }
+
   private async getEnabledOpenFolders(requireHybrid: boolean): Promise<WorkspaceFolderInfo[]> {
+    const workspaceFolders = await canonicalizeFolders(this.host.getWorkspaceFolders());
     const folders: WorkspaceFolderInfo[] = [];
-    for (const folder of this.host.getWorkspaceFolders()) {
-      const canonicalPath = await canonicalizePath(folder.path);
-      if (!this.enabledPaths.has(canonicalPath)) {
+    for (const enabledPath of [...this.enabledPaths].sort()) {
+      const canonicalPath = await canonicalizePath(enabledPath);
+      const exactWorkspaceFolder = workspaceFolders.find((folder) => folder.path === canonicalPath);
+      if (!workspaceFolders.some((folder) => isWithin(canonicalPath, folder.path))) {
         continue;
       }
       if (requireHybrid && !(await isHybridRepository(canonicalPath))) {
         continue;
       }
-      folders.push({ ...folder, path: canonicalPath });
+      folders.push({
+        name: exactWorkspaceFolder?.name ?? path.basename(canonicalPath),
+        path: canonicalPath,
+      });
     }
     return folders;
   }
@@ -184,10 +211,7 @@ export class RepositoryRegistry {
 
     if (requestedPath !== undefined) {
       const requestedRoot = await canonicalizePath(requestedPath);
-      const requestedFolder = await findCanonicalFolder(folders, requestedRoot);
-      if (requestedFolder !== undefined) {
-        return requestedFolder;
-      }
+      return findCanonicalFolder(folders, requestedRoot);
     }
 
     const activeFilePath = this.host.getActiveFilePath();
@@ -204,6 +228,15 @@ export class RepositoryRegistry {
     }
     return this.host.pickWorkspaceFolder(folders, placeHolder);
   }
+}
+
+async function canonicalizeFolders(
+  folders: readonly WorkspaceFolderInfo[],
+): Promise<WorkspaceFolderInfo[]> {
+  return Promise.all(folders.map(async (folder) => ({
+    ...folder,
+    path: await canonicalizePath(folder.path),
+  })));
 }
 
 async function findCanonicalFolder(
@@ -230,6 +263,30 @@ async function findContainingCanonicalFolder(
     }
   }
   return matches.sort((left, right) => right.path.length - left.path.length)[0];
+}
+
+async function findHybridRepositoryRoot(
+  activeFilePath: string,
+  workspaceFolders: readonly WorkspaceFolderInfo[],
+): Promise<string | undefined> {
+  const activePath = await canonicalizePath(activeFilePath);
+  const containingFolders = workspaceFolders
+    .filter((folder) => isWithin(activePath, folder.path))
+    .sort((left, right) => right.path.length - left.path.length);
+
+  for (const workspaceFolder of containingFolders) {
+    let candidate = path.dirname(activePath);
+    while (isWithin(candidate, workspaceFolder.path)) {
+      if (await isHybridRepository(candidate)) {
+        return candidate;
+      }
+      if (candidate === workspaceFolder.path) {
+        break;
+      }
+      candidate = path.dirname(candidate);
+    }
+  }
+  return undefined;
 }
 
 function isWithin(candidate: string, root: string): boolean {

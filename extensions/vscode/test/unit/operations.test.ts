@@ -29,20 +29,26 @@ class TestToken implements CancellationTokenLike {
 function createHost(trusted = true): OperationHost & {
   readonly errors: string[];
   readonly information: string[];
+  readonly requestedPaths: Array<string | undefined>;
 } {
   const errors: string[] = [];
   const information: string[] = [];
+  const requestedPaths: Array<string | undefined> = [];
   return {
+    requestedPaths,
     errors,
     information,
     isTrusted: trusted,
-    resolveTarget: async (): Promise<string> => '/tmp/hybrid-repository',
+    resolveTarget: async (requestedPath?: string): Promise<string> => {
+      requestedPaths.push(requestedPath);
+      return '/tmp/hybrid-repository';
+    },
     getExecutablePath: (): string => 'gew',
     runWithProgress: async (_title, task) => task(new TestToken(), (): void => undefined),
-    showInformation: async (message): Promise<void> => {
+    showInformation: (message): void => {
       information.push(message);
     },
-    showError: async (message): Promise<void> => {
+    showError: (message): void => {
       errors.push(message);
     },
     revealOutput: (): void => undefined,
@@ -82,6 +88,20 @@ describe('Operations', () => {
     ]);
   });
 
+  it('routes an SCM repository resource to target resolution', async () => {
+    const { operations, operationHost } = operationsFor([success]);
+    await operations.sync('/tmp/requested-repository');
+    assert.deepEqual(operationHost.requestedPaths, ['/tmp/requested-repository']);
+  });
+
+  it('explains how to enable a repository when no target is available', async () => {
+    const { operations, phases, operationHost } = operationsFor([success]);
+    operationHost.resolveTarget = async (): Promise<undefined> => undefined;
+    await operations.sync();
+    assert.deepEqual(phases, []);
+    assert.match(operationHost.information[0], /Enable for Current Repository/u);
+  });
+
   it('holds the repository lock across both Sync phases', async () => {
     const phases: string[] = [];
     let locked = false;
@@ -118,6 +138,14 @@ describe('Operations', () => {
     const { operations, phases } = operationsFor([cancelled]);
     await operations.sync();
     assert.deepEqual(phases, ['pull:pull --progress always']);
+  });
+
+  it('closes progress without waiting for the completion notification to be dismissed', async () => {
+    const { operations, operationHost } = operationsFor([success]);
+    const pendingNotification = new Promise<void>(() => undefined);
+    operationHost.showInformation = (): void => pendingNotification as unknown as void;
+
+    await operations.push();
   });
 
   it('does not run a process in an untrusted workspace', async () => {

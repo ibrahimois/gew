@@ -76,22 +76,22 @@
       "scm/title": [
         {
           "command": "gew.sync",
-          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "when": "isWorkspaceTrusted",
           "group": "navigation"
         },
         {
           "command": "gew.pull",
-          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "when": "gew.hasEnabledHybridRepository && isWorkspaceTrusted",
           "group": "gew@1"
         },
         {
           "command": "gew.push",
-          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "when": "gew.hasEnabledHybridRepository && isWorkspaceTrusted",
           "group": "gew@2"
         },
         {
           "command": "gew.disableRepository",
-          "when": "scmProvider == git && gew.hasEnabledHybridRepository && isWorkspaceTrusted",
+          "when": "gew.hasEnabledHybridRepository && isWorkspaceTrusted",
           "group": "gew@3"
         }
       ]

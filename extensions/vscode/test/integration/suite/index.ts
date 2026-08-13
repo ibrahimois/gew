@@ -22,6 +22,7 @@ export async function run(): Promise<void> {
   const api = await extension.activate();
 
   await verifyCommands();
+  verifyMixedWorkspaceMenuGuards(extension);
   await verifyIsolatedLaunchArguments();
   await verifyEnableDisable(api);
   await verifyGewOnlyRejection(api);
@@ -33,6 +34,32 @@ async function verifyCommands(): Promise<void> {
   const commands = await vscode.commands.getCommands(true);
   for (const command of commandIds) {
     assert.ok(commands.includes(command), `Expected command ${command} to be registered`);
+  }
+}
+
+function verifyMixedWorkspaceMenuGuards(extension: vscode.Extension<GewExtensionApi>): void {
+  const manifest = extension.packageJSON as {
+    contributes?: {
+      menus?: Record<string, Array<{ command?: string; when?: string; group?: string }>>;
+    };
+  };
+  const menus = manifest.contributes?.menus ?? {};
+  const sourceControlItems = menus['scm/title'] ?? [];
+
+  const sourceControlSync = sourceControlItems.find((item) => item.command === 'gew.sync');
+  assert.ok(sourceControlSync, 'Expected GEW Sync in the Source Control title menu');
+  assert.equal(sourceControlSync.when, 'isWorkspaceTrusted');
+  assert.equal(sourceControlSync.group, 'navigation');
+  assert.ok(!sourceControlSync.when.includes('scmProvider'));
+
+  assert.equal(menus['scm/repositories/title'], undefined,
+    'Stable VS Code extensions must not use the proposed multi-repository title menu');
+
+  for (const command of ['gew.pull', 'gew.push', 'gew.disableRepository']) {
+    const item = sourceControlItems.find((candidate) => candidate.command === command);
+    assert.ok(item, `Expected ${command} in the Source Control title menu`);
+    assert.equal(item.when, 'gew.hasEnabledHybridRepository && isWorkspaceTrusted');
+    assert.ok(!item.when.includes('scmProvider'), `${command} must work in mixed-provider workspaces`);
   }
 }
 
@@ -51,24 +78,24 @@ async function verifyIsolatedLaunchArguments(): Promise<void> {
 }
 
 async function verifyEnableDisable(api: GewExtensionApi): Promise<void> {
-  const workspaceRoot = await fs.promises.realpath(requiredEnvironment('GEW_VSCODE_TEST_WORKSPACE'));
+  const repositoryRoot = await fs.promises.realpath(requiredEnvironment('GEW_VSCODE_TEST_REPOSITORY'));
 
-  const enabled = await api.registry.enable();
+  const enabled = await api.registry.enable(repositoryRoot);
   assert.equal(enabled.status, 'enabled');
-  assert.deepEqual(api.registry.getEnabledPaths(), [workspaceRoot]);
-  assert.equal(await api.registry.resolveOperationTarget(), workspaceRoot);
+  assert.deepEqual(api.registry.getEnabledPaths(), [repositoryRoot]);
+  assert.equal(await api.registry.resolveOperationTarget(repositoryRoot), repositoryRoot);
 
-  const disabled = await api.registry.disable();
+  const disabled = await api.registry.disable(repositoryRoot);
   assert.equal(disabled.status, 'disabled');
   assert.deepEqual(api.registry.getEnabledPaths(), []);
-  assert.equal(await api.registry.resolveOperationTarget(), undefined);
+  assert.equal(await api.registry.resolveOperationTarget(repositoryRoot), undefined);
 }
 
 async function verifyGewOnlyRejection(api: GewExtensionApi): Promise<void> {
-  const workspaceRoot = requiredEnvironment('GEW_VSCODE_TEST_WORKSPACE');
-  await fs.promises.rm(path.join(workspaceRoot, '.git'), { recursive: true, force: true });
+  const repositoryRoot = requiredEnvironment('GEW_VSCODE_TEST_REPOSITORY');
+  await fs.promises.rm(path.join(repositoryRoot, '.git'), { recursive: true, force: true });
 
-  const result = await api.registry.enable();
+  const result = await api.registry.enable(repositoryRoot);
   assert.equal(result.status, 'notHybrid');
   assert.deepEqual(api.registry.getEnabledPaths(), []);
 }
@@ -99,8 +126,8 @@ async function verifyUntrustedExecutionDoesNotSpawn(): Promise<void> {
       },
       (): void => undefined,
     ),
-    showInformation: async (): Promise<void> => undefined,
-    showError: async (): Promise<void> => undefined,
+    showInformation: (): void => undefined,
+    showError: (): void => undefined,
     revealOutput: (): void => undefined,
   };
 

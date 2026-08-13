@@ -10,10 +10,12 @@ async function main(): Promise<void> {
   const fixtureRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gew-vscode-integration-'));
   const userDataDir = path.join(fixtureRoot, 'user-data');
   const extensionsDir = path.join(fixtureRoot, 'extensions');
-  const workspaceRoot = path.join(fixtureRoot, 'hybrid-fixture');
-  await fs.promises.mkdir(path.join(workspaceRoot, '.git'), { recursive: true });
-  await fs.promises.mkdir(path.join(workspaceRoot, '.gew'), { recursive: true });
+  const workspaceRoot = path.join(fixtureRoot, 'parent-workspace');
+  const repositoryRoot = path.join(workspaceRoot, 'hybrid-fixture');
+  await fs.promises.mkdir(path.join(repositoryRoot, '.git'), { recursive: true });
+  await fs.promises.mkdir(path.join(repositoryRoot, '.gew'), { recursive: true });
 
+  const vscodeExecutablePath = process.env.VSCODE_EXECUTABLE_PATH;
   const launchArgs = [
     workspaceRoot,
     '--disable-extensions',
@@ -29,13 +31,16 @@ async function main(): Promise<void> {
       JSON.stringify(launchArgs),
     );
     await runTests({
-      version: '1.125.0',
+      ...(vscodeExecutablePath === undefined
+        ? { version: '1.125.0' }
+        : { vscodeExecutablePath }),
       extensionDevelopmentPath,
       extensionTestsPath,
       launchArgs,
       extensionTestsEnv: sanitizeEnvironment({
         GEW_VSCODE_TEST_ROOT: fixtureRoot,
         GEW_VSCODE_TEST_WORKSPACE: workspaceRoot,
+        GEW_VSCODE_TEST_REPOSITORY: repositoryRoot,
         GEW_VSCODE_TEST_USER_DATA: userDataDir,
         GEW_VSCODE_TEST_EXTENSIONS: extensionsDir,
         GEW_VSCODE_EXPECT_TRUSTED: 'true',
